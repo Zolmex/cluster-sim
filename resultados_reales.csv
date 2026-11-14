@@ -1,0 +1,2 @@
+env,scenario_id,strategy,n_workers,latency_ms,seed,makespan_s,throughput_tps,mean_wait_s,load_imbalance_cv,control_messages
+real,batch_agro,least_loaded,3,1.0,42,0.314505,31.796035,0.044971,0.655808,36

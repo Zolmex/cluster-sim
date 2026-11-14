@@ -1,0 +1,37 @@
+# Prometheus en el HOST (fuera del clúster) recolectando node_exporter
+# de cada VM del laboratorio. Arranque sugerido:
+#   prometheus --config.file=monitoring/prometheus.yml
+# (la red 192.168.56.0/24 de libvirt es alcanzable desde el host).
+#
+# Las VMs exponen prometheus-node-exporter en el puerto 9100, instalado
+# y arrancado por ansible/playbook.yml en todos los nodos.
+
+global:
+  scrape_interval: 5s        # suficiente para experimentos cortos
+  scrape_timeout: 4s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: "sod-cluster"
+    static_configs:
+      # Coordinador
+      - targets: ["192.168.56.10:9100"]
+        labels:
+          node: "coordinador"
+          role: "coordinador"
+      # Workers (heterogéneos)
+      - targets: ["192.168.56.11:9100"]
+        labels:
+          node: "worker-1"
+          role: "worker"
+          profile: "potente"     # 2 vCPU / 1536 MB
+      - targets: ["192.168.56.12:9100"]
+        labels:
+          node: "worker-2"
+          role: "worker"
+          profile: "medio"       # 1 vCPU / 1024 MB
+      - targets: ["192.168.56.13:9100"]
+        labels:
+          node: "worker-3"
+          role: "worker"
+          profile: "antiguo"     # 1 vCPU / 512 MB + CPUQuota=50%

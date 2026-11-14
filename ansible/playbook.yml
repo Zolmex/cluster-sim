@@ -1,0 +1,145 @@
+---
+# Playbook del clúster SOD.
+#
+# Diseñado para ser ESTRICTAMENTE IDEMPOTENTE: la segunda ejecución debe
+# reportar changed=0 en todos los hosts (Vagrant lo invoca tras el
+# `vagrant up`; se puede re-lanzar a mano con:
+#   ANSIBLE_CONFIG= ansible-playbook -i .vagrant/provisioners/ansible/inventory/vagrant ansible/playbook.yml
+# ).
+
+- name: Configurar el clúster SOD
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Directorio de trabajo común dentro de cada VM.
+    sod_dir: /opt/sod_cluster
+    # Usuario propietario del directorio de trabajo (vagrant).
+    sod_owner: vagrant
+    # Cuota de CPU del servicio del worker: solo el nodo antiguo.
+    sod_worker_cpuquota: "{{ 'CPUQuota=50%' if inventory_hostname == 'worker-3' else '' }}"
+
+  handlers:
+    - name: Reiniciar sod-worker
+      ansible.builtin.systemd:
+        name: sod-worker
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    # --------------------------------------------------------------
+    # Tareas comunes: TODOS los nodos
+    # --------------------------------------------------------------
+    - name: Actualizar caché APT (si hace más de 1 h)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Instalar paquetes base
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-zmq
+          - python3-numpy
+          - iproute2          # tc (netem) e ip
+          - iperf3            # medición de ancho de banda
+          - prometheus-node-exporter
+        state: present
+
+    - name: Asegurar node_exporter activo en :9100
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+    - name: Crear {{ sod_dir }}
+      ansible.builtin.file:
+        path: "{{ sod_dir }}"
+        state: directory
+        owner: "{{ sod_owner }}"
+        group: "{{ sod_owner }}"
+        mode: "0755"
+
+    - name: Copiar código común a todos los nodos
+      ansible.builtin.copy:
+        src: "../{{ item }}"        # rutas relativas a ansible/ (raíz del repo)
+        dest: "{{ sod_dir }}/{{ item }}"
+        owner: "{{ sod_owner }}"
+        group: "{{ sod_owner }}"
+        mode: "0644"
+      loop:
+        - strategies.py
+        - workload.py
+        - coordinador.py
+        - worker.py
+      notify: Reiniciar sod-worker
+
+    # --------------------------------------------------------------
+    # Unidad systemd del worker (todos los workers; cuota solo en -3)
+    # --------------------------------------------------------------
+    - name: Instalar unidad systemd sod-worker.service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/sod-worker.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=SOD worker (ZeroMQ)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=vagrant
+          WorkingDirectory=/opt/sod_cluster
+          ExecStart=/usr/bin/python3 /opt/sod_cluster/worker.py --coordinator-ip 192.168.56.10
+          Restart=on-failure
+          RestartSec=3
+          {% if sod_worker_cpuquota %}
+          # Nodo antiguo emulado: techo duro de CPU vía cgroups v2 (systemd).
+          {{ sod_worker_cpuquota }}
+          {% endif %}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Reiniciar sod-worker
+
+    - name: Habilitar y arrancar sod-worker
+      ansible.builtin.systemd:
+        name: sod-worker
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # --------------------------------------------------------------
+    # Exclusivo del coordinador: SimGrid + ficheros de simulación
+    # --------------------------------------------------------------
+    - name: (coordinador) Instalar SimGrid precompilado
+      ansible.builtin.apt:
+        name: python3-simgrid
+        state: present
+      when: inventory_hostname == 'coordinador'
+
+    - name: (coordinador) Crear directorio de datos
+      ansible.builtin.file:
+        path: "{{ sod_dir }}/data"
+        state: directory
+        owner: "{{ sod_owner }}"
+        group: "{{ sod_owner }}"
+        mode: "0755"
+      when: inventory_hostname == 'coordinador'
+
+    - name: (coordinador) Copiar ficheros de simulación
+      ansible.builtin.copy:
+        src: "../{{ item }}"
+        dest: "{{ sod_dir }}/{{ item }}"
+        owner: "{{ sod_owner }}"
+        group: "{{ sod_owner }}"
+        mode: "0644"
+      loop:
+        - simulacion.py
+        - plataforma_base.xml
+      when: inventory_hostname == 'coordinador'

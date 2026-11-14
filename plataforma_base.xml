@@ -1,0 +1,81 @@
+<?xml version='1.0'?>
+<!DOCTYPE platform SYSTEM "https://simgrid.org/simgrid.dtd">
+<!--
+  plataforma_base.xml :: Plataforma SimGrid calibrada del laboratorio
+  (1 coordinador + 3 workers).
+
+  Espeja la topología real del Vagrantfile (red privada 192.168.56.0/24,
+  todos los nodos en el mismo segmento) con enlaces dedicados par a par
+  y routing Full.
+
+  COMO CALIBRAR (tras `vagrant up`):
+    1) Velocidad de CPU (speed, en FLOPS):
+       Ejecuta `python worker.py` con la opcion benchmark en cada VM. Imprime
+       la velocidad de la vCPU en unidades/s. Con "flops per unit" = 1 en
+       simulacion.py, pon aqui directamente esa cifra (p. ej. speed="9.3Mf").
+       Si mantienes las proporciones relativas entre nodos, usa:
+         flops_per_unit = velocidad_del_host_simulado / unidades_por_segundo_reales
+       Perfil: worker-1 potente (2 vCPU), worker-2 medio, worker-3 lento
+       (1 vCPU + CPUQuota=50 por ciento, ver playbook de ansible).
+    2) Latencia (latency): latencia UNIDIRECCIONAL de cada enlace dedicado.
+       Equivale al delay que aplica scripts/set_netem.sh (tc netem delay X
+       por interfaz, de modo que el RTT de ping resulta 2X). Tras medir con
+       `ping` entre VMs, pon latency = RTT_medido / 2 en todos los enlaces.
+       (La opcion latency de simulacion.py tambien sobreescribe este valor
+       dinamicamente en tiempo de ejecucion.)
+    3) Ancho de banda (bandwidth): medir con iperf3 entre VMs. SimGrid espera
+       bytes/s: bandwidth = Mbps_medidos / 8 (p. ej. 940 Mbps ~ "117.5MBps").
+-->
+<platform version="4.1">
+  <zone id="cluster-lab" routing="Full">
+
+    <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+         Hosts: velocidad de CPU calibrable (FLOPS). Perfil heterogéneo
+         potente / medio / lento igual que los perfiles del Vagrantfile.
+         SUSTITUIR estos valores tras el benchmark de worker.py (cabecera).
+         :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: -->
+    <host id="coordinador" speed="1Gf"/>   <!-- nodo de despacho (no computa) -->
+    <host id="worker-1"    speed="2Gf"/>   <!-- potente: 2 vCPU / 1536 MB -->
+    <host id="worker-2"    speed="1Gf"/>   <!-- medio:   1 vCPU / 1024 MB -->
+    <host id="worker-3"    speed="0.5Gf"/> <!-- lento:   1 vCPU / 512 MB -->
+
+    <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+         Enlaces dedicados par a par (una pareja de VMs por enlace, como
+         las rutas punto a punto del bridge host-only).
+         SUSTITUIR bandwidth/latency tras iperf3 + ping (ver cabecera):
+           latency = RTT_ping / 2  (latencia unidireccional por enlace)
+         Nota: la opcion latency de simulacion.py sobreescribe estos valores.
+         :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: -->
+    <link id="link-coordinador-worker-1" bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-coordinador-worker-2" bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-coordinador-worker-3" bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-worker-1-worker-2"    bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-worker-1-worker-3"    bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-worker-2-worker-3"    bandwidth="100Mbps" latency="1ms"/>
+
+    <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+         Rutas del routing Full. Cada pareja usa su enlace dedicado, asi
+         la latencia de un trayecto coordinador a worker es exactamente la
+         del enlace (RTT de una consulta STATUS = 2 x latency). Las rutas
+         inversas se derivan por simetria (symmetrical=YES por defecto).
+         :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: -->
+    <route src="coordinador" dst="worker-1">
+      <link_ctn id="link-coordinador-worker-1"/>
+    </route>
+    <route src="coordinador" dst="worker-2">
+      <link_ctn id="link-coordinador-worker-2"/>
+    </route>
+    <route src="coordinador" dst="worker-3">
+      <link_ctn id="link-coordinador-worker-3"/>
+    </route>
+    <route src="worker-1" dst="worker-2">
+      <link_ctn id="link-worker-1-worker-2"/>
+    </route>
+    <route src="worker-1" dst="worker-3">
+      <link_ctn id="link-worker-1-worker-3"/>
+    </route>
+    <route src="worker-2" dst="worker-3">
+      <link_ctn id="link-worker-2-worker-3"/>
+    </route>
+  </zone>
+</platform>

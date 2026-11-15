@@ -74,17 +74,35 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-sod" },
           "expr": "rate(node_network_receive_bytes_total{job=\"sod-cluster\", device=\"eth1\"}[$__rate_interval])",
-          "legendFormat": "{{node}} rx (lab)",
+          "legendFormat": "{{node}} rx",
           "refId": "A"
+        }
+      ],
+      "title": "Datos recibidos en la red del lab (eth1 rx, 192.168.56.0/24)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus-sod" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+          "unit": "Bps"
         },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-sod" },
           "expr": "rate(node_network_transmit_bytes_total{job=\"sod-cluster\", device=\"eth1\"}[$__rate_interval])",
-          "legendFormat": "{{node}} tx (lab)",
-          "refId": "B"
+          "legendFormat": "{{node}} tx",
+          "refId": "A"
         }
       ],
-      "title": "Tráfico en la red del laboratorio (eth1, 192.168.56.0/24)",
+      "title": "Datos enviados en la red del lab (eth1 tx, 192.168.56.0/24)",
       "type": "timeseries"
     },
     {
@@ -97,7 +115,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
       "id": 4,
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
       "targets": [
@@ -124,7 +142,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 16 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 24 },
       "id": 5,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "text": {} },
       "targets": [

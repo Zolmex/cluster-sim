@@ -130,24 +130,76 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus-sod" },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "fixedColor": "#ad46ff",
+            "mode": "thresholds"
+          },
           "mappings": [
-            { "type": "value", "options": { "1": { "color": "green", "text": "UP" }, "0": { "color": "red", "text": "DOWN" } } }
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
           ],
-          "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
       "id": 5,
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "text": {} },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {},
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.3.1",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus-sod" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-sod"
+          },
           "expr": "up{job=\"sod-cluster\"}",
           "legendFormat": "{{node}} ({{role}})",
           "refId": "A"

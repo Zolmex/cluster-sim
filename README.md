@@ -57,7 +57,7 @@ analisis_resultados.py   Notebook de análisis (celdas # %%): descriptiva, valid
 ### 1.1 Linux — Arch (incluye Omarchy)
 
 ```bash
-sudo pacman -S --needed vagrant libvirt qemu-base virt-manager dnsmasq ansible rsync
+sudo pacman -S --needed vagrant libvirt qemu-base virt-manager dnsmasq ansible rsync base-devel
 sudo usermod -aG libvirt "$USER"   # re-login para que aplique
 sudo systemctl enable --now libvirtd
 vagrant plugin install vagrant-libvirt
@@ -72,8 +72,8 @@ vagrant plugin install vagrant-libvirt
 ```bash
 sudo apt update
 sudo apt install -y vagrant libvirt-daemon-system libvirt-clients virtinst \
-                    dnsmasq-base ansible rsync python3-venv build-essential \
-                    ruby-dev libvirt-dev zlib1g-dev pkg-config
+                    dnsmasq-base ansible rsync python3-venv python3-dev \
+                    build-essential ruby-dev libvirt-dev zlib1g-dev pkg-config
 sudo usermod -aG libvirt "$USER"   # re-login
 sudo systemctl enable --now libvirtd
 # Debian trae el plugin como paquete; si no existe, instalarlo con vagrant:
@@ -84,7 +84,7 @@ sudo apt install -y vagrant-libvirt || vagrant plugin install vagrant-libvirt
 
 ```bash
 sudo dnf install -y @virtualization vagrant ansible rsync \
-                    gcc ruby-devel libvirt-devel zlib-devel
+                    gcc gcc-c++ python3-devel ruby-devel libvirt-devel zlib-devel
 sudo usermod -aG libvirt "$USER"   # re-login
 sudo systemctl enable --now libvirtd
 vagrant plugin install vagrant-libvirt
@@ -153,6 +153,7 @@ sudo firewall-cmd --zone=libvirt --add-service=libvirt --permanent && sudo firew
 
 ```bash
 vagrant up                 # 4 VMs + provision Ansible al final (limit=all, una vez)
+                           # la 1ª vez descarga el box debian/bookworm64 (~400 MB)
 vagrant status             # coordinador, worker-1/2/3 -> running
 ```
 
@@ -182,6 +183,14 @@ rsync, python3-pip, iperf3, prometheus-node-exporter, unit `sod-worker.service`
 en los workers y SimGrid en el coordinador). Re-corrida manual:
 `vagrant provision`. Si falla por caché APT vieja:
 `vagrant ssh worker-N --command 'sudo apt-get update'` y repetir.
+
+**Carpeta sincronizada:** el repo se sincroniza a `/vagrant` en cada VM por
+rsync, pero **solo el código** (el `Vagrantfile` excluye `monitoring/`, los
+venvs, `data/`, etc. — sin esos excludes cada `vagrant up` subiría ~2.6 GB a
+CADA VM: red y CPU al 100% por varios minutos). Gotcha si cambiás los
+excludes: Vagrant cachea esta config en
+`.vagrant/machines/<vm>/libvirt/synced_folders` al momento del `vagrant up`;
+un `vagrant reload` (o borrar esos archivos y volver a levantar) la regenera.
 
 Apagar / limpiar:
 
@@ -256,6 +265,10 @@ python3 -m venv .venv-simgrid
 .venv-simgrid/bin/pip install --no-build-isolation simgrid
 ```
 
+> La instalación de `simgrid` **compila código C++ (~5-10 min)**: necesita el
+> compilador y los headers de Python de tu distro (§1 ya los incluye:
+> `base-devel` en Arch, `python3-dev` en Debian, `python3-devel` en Fedora).
+
 **Test de calibración (empezar por acá):**
 
 ```bash
@@ -274,12 +287,22 @@ coincidir con el analítico (`error relativo: 0.0% -> OK`) y la fila queda en
 ```
 
 **Lotes automáticos** (SimGrid admite un Engine por proceso: cada combinación
-va en un subproceso):
+va en un subproceso). Ambos lotes usan semilla fija (42), y escriben **directo
+en `data/`** con los nombres que espera el análisis del §7:
 
 ```bash
-./scripts/correr_simulacion.sh --batch-all --batch-mode validacion      # n=3, 45 corridas
-./scripts/correr_simulacion.sh --batch-all --batch-mode escalabilidad   # n=16..512
+mkdir -p data
+./scripts/correr_simulacion.sh --batch-all --batch-mode validacion \
+    --output-csv data/resultados_simgrid_val.csv      # 9 corridas: 3 estrategias × latencias 1/20/100 ms
+./scripts/correr_simulacion.sh --batch-all --batch-mode escalabilidad \
+    --output-csv data/resultados_simgrid_scale.csv    # 12 corridas: 3 estrategias × n = 16/64/256/512
 ```
+
+- `validacion` replica el escenario del clúster real (3 workers, mismas
+  latencias) → es lo que el §7 compara contra `data/resultados_reales.csv`.
+- `escalabilidad` extrapola a 16/64/256/512 workers con latencia fija de 1 ms.
+- Sin `--output-csv`, las filas caen en `resultados_simulacion.csv` de la
+  raíz (ahí también va el `--trivial-test`).
 
 Salidas: filas con el esquema
 `env,scenario_id,strategy,n_workers,latency_ms,seed,makespan_s,
@@ -309,11 +332,41 @@ vagrant ssh coordinador --command 'tail -5 /tmp/run_rr_1_42.log; cat /tmp/run_rr
 ```
 
 La corrida termina sola (~30 s: despacha 100 tareas, espera resultados, manda
-STOP y escribe el CSV). Conviene **acumular** las filas en
-`data/resultados_reales.csv` del host (escribir el header una vez).
+STOP y escribe el CSV). Copiar la fila al host y **acumularla** en
+`data/resultados_reales.csv` (la primera vez incluye la cabecera; después se
+agregan solo las filas):
 
-Parámetros del diseño: 3 estrategias × 3 latencias (1/20/100 ms) × 5 semillas
-(11, 42, 73, 101, 137) = **45 corridas**.
+```bash
+mkdir -p data
+vagrant ssh coordinador --command 'cat /tmp/run_rr_1_42.csv' \
+  | (grep -q strategy data/resultados_reales.csv 2>/dev/null && tail -n +2 || cat) \
+  >> data/resultados_reales.csv
+```
+
+**Campaña completa del diseño**: 3 estrategias × 3 latencias (1/20/100 ms) ×
+5 semillas (11, 42, 73, 101, 137) = **45 corridas** (~30-40 min en total).
+El netem es global, así que el bucle exterior va por latencia:
+
+```bash
+for lat in 1 20 100; do
+  ./scripts/set_netem.sh "$lat"
+  for strat in round_robin least_loaded power_of_two; do
+    for seed in 11 42 73 101 137; do
+      out="/tmp/run_${strat}_${lat}_${seed}.csv"
+      vagrant ssh coordinador --command "nohup python3 /opt/sod_cluster/coordinador.py \
+          --strategy $strat --workers 3 --latency $lat --seed $seed \
+          --output-csv $out > ${out%.csv}.log 2>&1 & echo lanzado"
+      sleep 45    # margen: la corrida dura ~30 s (más con latencia 100 ms)
+      vagrant ssh coordinador --command "tail -1 ${out%.csv}.log"
+      vagrant ssh coordinador --command "cat $out" \
+        | (grep -q strategy data/resultados_reales.csv 2>/dev/null && tail -n +2 || cat) \
+        >> data/resultados_reales.csv
+      echo "==> done: $strat lat=${lat}ms seed=$seed"
+    done
+  done
+done
+./scripts/set_netem.sh 0    # NUNCA olvidar: limpia el qdisc
+```
 
 **Gotchas:**
 
@@ -358,11 +411,14 @@ Qué produce (300 DPI, estilo APA, etiquetas en español):
    saturación del coordinador en `least_loaded`.
 5. Export: `figuras/*.png` y `tablas/*.{csv,tex}`.
 
-**Importante:** si los CSV de `data/` no existen, la primera celda genera
-**datos sintéticos** para que el pipeline sea ejecutable de inmediato. Cuando
-haya datos reales, ponerlos en `data/resultados_reales.csv`,
-`data/resultados_simgrid_val.csv` y `data/resultados_simgrid_scale.csv`
-(esquema del §5) y el análisis corre sobre ellos sin cambiar nada.
+**Importante:** la primera celda revisa `data/`. Si **ninguno** de los 3 CSV
+existe, genera los tres con **datos sintéticos** para que el pipeline sea
+ejecutable de inmediato. Si existe un subconjunto, genera sintéticos **solo
+para los faltantes** (y avisa que el análisis mezclará datos reales y
+sintéticos — llenar los tres con datos de verdad es lo ideal:
+`data/resultados_reales.csv` del §6, `data/resultados_simgrid_val.csv` y
+`data/resultados_simgrid_scale.csv` del §5, con el esquema indicado ahí).
+El análisis corre sobre ellos sin cambiar nada.
 
 ---
 

@@ -32,8 +32,20 @@ Vagrant.configure('2') do |config|
   config.vm.box = 'debian/bookworm64'
 
   # rsync en lugar de NFS/SSHFS: evita errores de NFS en hosts Arch Linux.
+  #
+  # IMPORTANTE: solo se sincroniza el código del lab. Lo demás se excluye
+  # porque no lo usa ningún guest y puede pesar GIGAS (monitoring/bin/ tiene
+  # los binarios de Prometheus/Grafana; los venvs, etc.). Sin estos excludes,
+  # cada `vagrant up` sube ~2.6 GB a CADA VM por SSH (red + CPU al 100%).
   config.vm.synced_folder '.', '/vagrant', type: 'rsync',
-    rsync__exclude: ['.git/', '.venv/', '__pycache__/']
+    rsync__exclude: [
+      '.git/', '.gitbutler/', '.vagrant/',
+      '.venv/', '.venv-simgrid/',
+      '__pycache__/',
+      'monitoring/',      # corre en el host (ver README §4)
+      'data/', 'figuras/', 'tablas/',
+      'docs/', '*.ipynb'
+    ]
 
   # Red privada común a todas las VMs (definida por VM con IP fija).
   # NOTA: vagrant-libvirt crea además su red de gestión (192.168.121.0/24);

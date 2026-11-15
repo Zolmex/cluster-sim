@@ -109,7 +109,9 @@ def _fila(env, escenario, estrategia, n_w, lat, semilla, mk, tp, wait, cv, msgs)
     }
 
 
-def generar_sinteticos() -> None:
+def generar_sinteticos(solo=None) -> None:
+    """Genera datos sintéticos. Con `solo` (lista de rutas) escribe únicamente
+    esos archivos y preserva los que ya existan (p.ej. datos reales)."""
     """Crea los tres CSV con patrones esperados del sistema.
 
     Hipótesis modeladas:
@@ -176,17 +178,34 @@ def generar_sinteticos() -> None:
                     wait = (mk / 10) * cv
                     filas_scale.append(_fila("simgrid_scale", "extrapolacion", estrategia, n_w, lat, semilla, mk, tp, wait, cv, msgs))
 
-    pd.DataFrame(filas_real, columns=ESQUEMA).to_csv(ARCHIVO_REAL, index=False)
-    pd.DataFrame(filas_val, columns=ESQUEMA).to_csv(ARCHIVO_VAL, index=False)
-    pd.DataFrame(filas_scale, columns=ESQUEMA).to_csv(ARCHIVO_SCALE, index=False)
-    print(f"[sintéticos] Escritos: {ARCHIVO_REAL.name}, {ARCHIVO_VAL.name}, {ARCHIVO_SCALE.name}")
+    faltantes = [a for a in (ARCHIVO_REAL, ARCHIVO_VAL, ARCHIVO_SCALE)
+                 if solo is None or a in solo]
+    if faltantes:
+        if len(faltantes) == 3:
+            pd.DataFrame(filas_real, columns=ESQUEMA).to_csv(ARCHIVO_REAL, index=False)
+            pd.DataFrame(filas_val, columns=ESQUEMA).to_csv(ARCHIVO_VAL, index=False)
+            pd.DataFrame(filas_scale, columns=ESQUEMA).to_csv(ARCHIVO_SCALE, index=False)
+        else:
+            if ARCHIVO_REAL in faltantes:
+                pd.DataFrame(filas_real, columns=ESQUEMA).to_csv(ARCHIVO_REAL, index=False)
+            if ARCHIVO_VAL in faltantes:
+                pd.DataFrame(filas_val, columns=ESQUEMA).to_csv(ARCHIVO_VAL, index=False)
+            if ARCHIVO_SCALE in faltantes:
+                pd.DataFrame(filas_scale, columns=ESQUEMA).to_csv(ARCHIVO_SCALE, index=False)
+        for a in faltantes:
+            print(f"[sintéticos] Escrito: {a.name}")
+        if len(faltantes) < 3:
+            print("[sintéticos] ¡ATENCIÓN! El análisis mezcla datos sintéticos con "
+                  "los archivos reales ya presentes en data/.")
 
 
-if not (ARCHIVO_REAL.exists() and ARCHIVO_VAL.exists() and ARCHIVO_SCALE.exists()):
-    print("[datos] Faltan CSV en data/: se generan datos sintéticos realistas.")
-    generar_sinteticos()
-else:
+faltantes = [a for a in (ARCHIVO_REAL, ARCHIVO_VAL, ARCHIVO_SCALE) if not a.exists()]
+if not faltantes:
     print("[datos] CSVs encontrados en data/: se usan los archivos existentes.")
+else:
+    print(f"[datos] Faltan {len(faltantes)} CSV en data/: se generan datos "
+          f"sintéticos SOLO para los faltantes ({', '.join(a.name for a in faltantes)}).")
+    generar_sinteticos(solo=faltantes)
 
 # %% [2] Carga de datos ------------------------------------------------------
 df_real = pd.read_csv(ARCHIVO_REAL)

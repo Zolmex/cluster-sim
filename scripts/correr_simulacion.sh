@@ -15,12 +15,13 @@ set -euo pipefail
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PY="${RAIZ}/.venv-simgrid/bin/python"
-SITE_PKGS="${RAIZ}/.venv-simgrid/lib/python3.14/site-packages"
+# La versión dentro de site-packages depende del python que creó el venv.
+SITE_PKGS="$(ls -d "${RAIZ}"/.venv-simgrid/lib/python3.*/site-packages 2>/dev/null | head -1)"
 
-if [[ ! -x "${VENV_PY}" ]]; then
-    echo "ERROR: falta el venv ${RAIZ}/.venv-simgrid" >&2
+if [[ ! -x "${VENV_PY}" || -z "${SITE_PKGS}" ]]; then
+    echo "ERROR: falta el venv ${RAIZ}/.venv-simgrid (o su site-packages)" >&2
     echo "Créalo con:" >&2
-    echo "  python -m venv .venv-simgrid && .venv-simgrid/bin/pip install \\" >&2
+    echo "  python3 -m venv .venv-simgrid && .venv-simgrid/bin/pip install \\" >&2
     echo "      pybind11==2.13.6 cmake setuptools wheel && \\" >&2
     echo "      .venv-simgrid/bin/pip install --no-build-isolation simgrid" >&2
     exit 1

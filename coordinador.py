@@ -135,11 +135,13 @@ def esperar_registro(router, n_esperados, timeout_s):
         if msg.get("type") != "REGISTER":
             continue  # ignora mensajes previos al registro completo
         wid = ident.decode()
+        es_nuevo = wid not in endpoints  # re-REGISTROS en cola: solo 1 print
         endpoints[wid] = msg.get("status_endpoint")  # p. ej. tcp://host:5556
         # ACK de registro (cuenta como mensaje de control). A DEALER se le
         # envía [ident, payload] SIN frame delimitador vacío.
         router.send_multipart([ident, json.dumps({"type": "REGISTER_ACK"}).encode()])
-        print(f"[REG] {wid} (control: {endpoints[wid] or 'n/d'})")
+        if es_nuevo:
+            print(f"[REG] {wid} (control: {endpoints[wid] or 'n/d'})")
     return endpoints
 
 

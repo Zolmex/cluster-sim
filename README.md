@@ -169,14 +169,19 @@ con libvirt; VirtualBox usa su host-only net):
 
 Ampliar el clúster: `N_WORKERS=5 vagrant up` (perfiles asignados cíclicamente).
 
-**Configurar la red del lab (solo si las VMs se crearon de cero):**
-vagrant-libvirt no configura eth1 en el guest; crearla a mano en cada VM
-(las IPs son fijas por diseño):
+**Red del lab:** Vagrant configura `eth1` solo (bloque `VAGRANT-BEGIN` en
+`/etc/network/interfaces` del guest, estática con las IPs de la tabla y
+persistente entre boots). Verificar tras el `vagrant up`:
 
 ```bash
-vagrant ssh coordinador --command "sudo bash -c 'ip addr add 192.168.56.10/24 dev eth1 2>/dev/null; ip link set eth1 up; printf \"auto eth1\niface eth1 inet static\n    address 192.168.56.10\n    netmask 255.255.255.0\n\" > /etc/network/interfaces.d/eth1'"
-# mismo patrón con .11/.12/.13 en worker-1/2/3; verificar: ip -br a show eth1
+for m in coordinador worker-1 worker-2 worker-3; do
+    vagrant ssh $m --command "echo $m: \$(ip -br a show eth1)"
+done   # esperado: UP con .10/.11/.12/.13
 ```
+
+Si alguna VM se crea de cero y eth1 no levanta (versión vieja del plugin
+vagrant-libvirt), crearla a mano como fallback:
+`vagrant ssh <vm> --command "sudo ip addr add 192.168.56.1X/24 dev eth1; sudo ip link set eth1 up"`.
 
 **Provision:** corre automático al final del primer `vagrant up` (instala
 rsync, python3-pip, iperf3, prometheus-node-exporter, unit `sod-worker.service`
@@ -196,7 +201,7 @@ Apagar / limpiar:
 
 ```bash
 vagrant halt        # pausa (conserva provision y config in-guest) — para pausar
-vagrant destroy -f  # BORRA todo: hay que re-configurar eth1 y provisionar de nuevo
+vagrant destroy -f  # BORRA las VMs: el siguiente `vagrant up` las recrea y provisiona
 ```
 
 ---
@@ -377,6 +382,11 @@ done
 - El netem es global (afecta a las 4 VMs): el bucle de la campaña va por
   latencia. Terminar siempre con `./scripts/set_netem.sh 0`.
 - worker-3 está limitado a 50% de CPU por cgroups (emula el nodo antiguo).
+- **Ciclo de vida automático:** al terminar cada corrida el coordinador manda
+  STOP y los workers salen limpios; systemd los relanza (`Restart=always`)
+  y se vuelven a registrar solos (el worker reintenta REGISTER cada 2.5 s
+  hasta recibir ACK). El bucle de la campaña no necesita reiniciar nada a
+  mano — solo dejar ~5 s entre corridas.
 
 ---
 
@@ -428,7 +438,7 @@ El análisis corre sobre ellos sin cambiar nada.
 rm -f data/*.csv && rm -rf figuras tablas analisis_resultados.ipynb
 # resultados_simulacion.csv (raíz) acumula corridas: para dejarlo "en blanco"
 # quedarse solo con la cabecera.
-vagrant halt     # pausa;  vagrant destroy -f borra TODO (ver §3: re-configurar eth1)
+vagrant halt     # pausa;  vagrant destroy -f borra las VMs (se recrean y provisionan solas)
 ```
 
 ---

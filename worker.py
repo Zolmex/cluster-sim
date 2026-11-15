@@ -103,6 +103,7 @@ class WorkerState:
         self.active_cpu_s = 0.0       # tiempo total activo acumulado
         self.tasks_completed = 0
         self.stop_event = threading.Event()
+        self.registrado = threading.Event()   # ACK del coordinador recibido
 
     def load(self) -> int:
         """Carga vista por el canal de control: cola + en ejecución."""
@@ -132,6 +133,7 @@ def hilo_receptor(dealer, estado: WorkerState, worker_id: str):
         if tipo == "TASK":
             estado.tareas.put(msg)
         elif tipo == "REGISTER_ACK":
+            estado.registrado.set()
             print(f"[REG] ACK recibido por el coordinador ({worker_id})")
         elif tipo == "STOP":
             # centinela: el hilo trabajador termina tras drenar la cola
@@ -243,26 +245,34 @@ def run_worker(args):
     h_trabajo = None
 
     try:
-        # 1) REGISTER con el endpoint de control anunciado
-        mi_ip = get_local_ip(args.coordinator_ip)
-        status_endpoint = f"tcp://{mi_ip}:{PORT_STATUS}"
-        dealer.send_json({"type": "REGISTER",
-                          "worker_id": args.worker_id,
-                          "status_endpoint": status_endpoint})
-        print(f"[REG] {args.worker_id} -> {args.coordinator_ip}:{PORT_TASKS} "
-              f"(control: {status_endpoint})")
-
-        # 2) Lanzar los tres hilos de servicio
+        # 1) REGISTER con REINTENTOS hasta ACK. El worker corre como servicio
+        #    systemd y puede arrancar ANTES que exista cualquier coordinador:
+        #    el REGISTER enviado una sola vez queda en cola de ZMQ y lo
+        #    consume el primer ROUTER que aparezca (o nadie) — sin reintentos,
+        #    TODA corrida posterior del coordinador vería 0 workers.
         h_receptor = threading.Thread(target=hilo_receptor,
                                       args=(dealer, estado, args.worker_id),
                                       daemon=True, name="receptor")
+        h_receptor.start()
+
+        mi_ip = get_local_ip(args.coordinator_ip)
+        status_endpoint = f"tcp://{mi_ip}:{PORT_STATUS}"
+        reg = {"type": "REGISTER",
+               "worker_id": args.worker_id,
+               "status_endpoint": status_endpoint}
+        while not estado.registrado.is_set() and not estado.stop_event.is_set():
+            dealer.send_json(reg)
+            print(f"[REG] {args.worker_id} -> {args.coordinator_ip}:{PORT_TASKS} "
+                  f"(control: {status_endpoint})")
+            estado.registrado.wait(timeout=2.5)
+
+        # 2) Lanzar los hilos restantes de servicio
         h_control = threading.Thread(target=hilo_control,
                                      args=(rep, estado, args.worker_id),
                                      daemon=True, name="control")
         h_trabajo = threading.Thread(target=hilo_trabajador,
                                      args=(dealer, estado, args.worker_id),
                                      daemon=True, name="trabajador")
-        h_receptor.start()
         h_control.start()
         h_trabajo.start()
 

@@ -83,13 +83,15 @@ Vagrant.configure('2') do |config|
   end
 
   # ------------------------------------------------------------------
-  # Aprovisionamiento con Ansible, UNA SOLA VEZ y al final, cuando todas
-  # las VMs están levantadas (limit = "all" evita correr el playbook por
-  # cada máquina).
+  # Aprovisionamiento con Ansible.
+  # IMPORTANTE: sin `limit`, cada VM corre el playbook apuntando solo a
+  # sí misma (los runs van en serie, sin piso). Con `limit = "all"` Vagrant
+  # lanza UN run POR CADA VM apuntando a TODAS → 4 ansible-playbook
+  # concurrentes que se pisan el lock de dpkg (visto en logs: "Unable to
+  # acquire the dpkg frontend lock" y "No package matching 'python3-pip'").
   # ------------------------------------------------------------------
   config.vm.provision 'ansible' do |ansible|
     ansible.playbook = 'ansible/playbook.yml'
-    ansible.limit    = 'all'
     ansible.compatibility_mode = '2.0'
   end
 

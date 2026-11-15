@@ -13,6 +13,9 @@
   gather_facts: true
 
   vars:
+    # Silencia el warning de auto-discovery de Ansible (todas las VMs son
+    # Debian 12 con /usr/bin/python3).
+    ansible_python_interpreter: /usr/bin/python3
     # Directorio de trabajo común dentro de cada VM.
     sod_dir: /opt/sod_cluster
     # Usuario propietario del directorio de trabajo (vagrant).
@@ -31,10 +34,10 @@
     # --------------------------------------------------------------
     # Tareas comunes: TODOS los nodos
     # --------------------------------------------------------------
-    - name: Actualizar caché APT (si hace más de 1 h)
+    - name: Actualizar caché APT (siempre - una lista vieja rompe el install)
       ansible.builtin.apt:
         update_cache: true
-        cache_valid_time: 3600
+        lock_timeout: 180
 
     - name: Instalar paquetes base
       ansible.builtin.apt:
@@ -47,6 +50,7 @@
           - iperf3            # medición de ancho de banda
           - prometheus-node-exporter
         state: present
+        lock_timeout: 180
 
     - name: Asegurar node_exporter activo en :9100
       ansible.builtin.systemd:
@@ -96,7 +100,11 @@
           User=vagrant
           WorkingDirectory=/opt/sod_cluster
           ExecStart=/usr/bin/python3 /opt/sod_cluster/worker.py --coordinator-ip 192.168.56.10
-          Restart=on-failure
+          # always (no solo on-failure): tras cada corrida el coordinador manda
+          # STOP y el worker sale LIMPIO (exit 0); con on-failure quedaría
+          # caído y la siguiente corrida no tendría workers. Con always,
+          # systemd lo relanza y el worker vuelve a registrarse (retry).
+          Restart=always
           RestartSec=3
           {% if sod_worker_cpuquota %}
           # Nodo antiguo emulado: techo duro de CPU vía cgroups v2 (systemd).
@@ -121,6 +129,7 @@
       ansible.builtin.apt:
         name: python3-simgrid
         state: present
+        lock_timeout: 180
       when: inventory_hostname == 'coordinador'
 
     - name: (coordinador) Crear directorio de datos

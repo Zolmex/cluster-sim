@@ -221,3 +221,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# cluster-sim
+.venv/
+.venv-simgrid/
+data/
+figuras/
+tablas/
+analisis_resultados.ipynb
+monitoring/bin/
+monitoring/data-prom/
+monitoring/data-grafana/
+monitoring/logs/
+monitoring/.pids/
+.vagrant/

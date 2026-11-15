@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: SOD Cluster
+    folder: SOD
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      # RENDEREADO por start_monitoring.sh con la ruta absoluta del repo
+      # (Grafana no expande ~ ni variables en provisioning).
+      path: /home/zolmex/Documents/Git/cluster-sim/monitoring/grafana/dashboards

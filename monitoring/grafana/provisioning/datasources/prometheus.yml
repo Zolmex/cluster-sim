@@ -1,0 +1,13 @@
+# Provisioning automático del datasource Prometheus.
+# Grafana lee esto al arrancar si GF_PATHS_PROVISIONING_DIR apunta acá
+# (lo hace start_monitoring.sh).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus SOD
+    uid: prometheus-sod
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: false

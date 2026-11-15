@@ -31,6 +31,29 @@ analisis_resultados.py   Notebook de análisis (celdas # %%): descriptiva, valid
 
 ---
 
+## Ruta de trabajo (de cero a resultados)
+
+El orden recomendado. Los pasos 5 y 6 son independientes entre sí: podés
+hacerlos en cualquier orden, pero **el notebook del paso 7 necesita los tres
+CSV de `data/`** (uno del paso 5, dos del paso 6).
+
+| # | Qué hacer | Sección |
+|---|---|---|
+| 0 | Instalar herramientas + firewall (una vez por máquina) | §0-§2 |
+| 1 | `vagrant up` → verificar eth1 y servicios | §3 |
+| 2 | *(opcional)* Monitoreo Prometheus + Grafana | §4 |
+| 3 | **Calibrar el modelo SimGrid** con mediciones del clúster real | §5.1 |
+| 4 | Sanity-check SimGrid: `--trivial-test` | §5 |
+| 5 | **Experimento real**: campaña de 45 corridas → `data/resultados_reales.csv` | §6 |
+| 6 | **Lotes SimGrid** → `data/resultados_simgrid_val.csv` + `..._scale.csv` | §5 |
+| 7 | Notebook de análisis → `figuras/` + `tablas/` | §7 |
+| 8 | Reset del experimento (cuando quieras empezar de nuevo) | §8 |
+
+Si solo querés probar el pipeline sin clúster: los pasos 6-7 funcionan sin
+VMs (los datos que falten en `data/` se generan sintéticos, §7).
+
+---
+
 ## 0. Requisitos de software
 
 | Herramienta | Para qué | Dónde se instala |
@@ -261,8 +284,10 @@ Verificar targets: Prometheus → *Status → Targets*, o el resumen que imprime
 
 ## 5. Ejecutar la simulación con SimGrid
 
-El launcher `scripts/correr_simulacion.sh` usa el venv dedicado
-`.venv-simgrid` (bindings S4U de SimGrid 4.1). Si no existe:
+La simulación corre **en el host** (no dentro de las VMs): usa el modelo
+`plataforma_base.xml` en vez de las VMs reales. El launcher
+`scripts/correr_simulacion.sh` usa el venv dedicado `.venv-simgrid`
+(bindings S4U de SimGrid 4.1). Si no existe:
 
 ```bash
 python3 -m venv .venv-simgrid
@@ -274,7 +299,37 @@ python3 -m venv .venv-simgrid
 > compilador y los headers de Python de tu distro (§1 ya los incluye:
 > `base-devel` en Arch, `python3-dev` en Debian, `python3-devel` en Fedora).
 
-**Test de calibración (empezar por acá):**
+### 5.1 Calibración del modelo (medir el clúster real → `plataforma_base.xml`)
+
+Los tres parámetros del XML se miden sobre el clúster real (paso 1 de la
+ruta). Con las VMs levantadas:
+
+```bash
+# 1) Velocidad de CPU de cada worker (unidades CPU/s → speed="..."):
+for m in worker-1 worker-2 worker-3; do
+    echo "== $m"; vagrant ssh $m --command 'python3 /opt/sod_cluster/worker.py --benchmark'
+done
+
+# 2) Ancho de banda entre VMs (Mbps → bandwidth="...Mbps"):
+vagrant ssh worker-1 --command 'iperf3 -s -D'
+vagrant ssh worker-2 --command 'iperf3 -c 192.168.56.11 -t 5'
+vagrant ssh worker-1 --command 'pkill iperf3'
+
+# 3) Latencia: es un parámetro del diseño (1/20/100 ms, set_netem).
+#    Verificación puntual: el RTT de ping entre VMs ≈ 2 × latencia aplicada.
+./scripts/set_netem.sh 20
+vagrant ssh worker-1 --command 'ping -c 3 192.168.56.10'
+./scripts/set_netem.sh 0
+```
+
+Anotá los valores en `plataforma_base.xml` (su cabecera explica qué campo
+toca en cada caso). El dashboard de Grafana (§4) sirve acá para **validar el
+modelo**: worker-3 debe verse techo a ~50% de CPU (CPUQuota) y los paneles
+rx/tx de eth1 deben cuadrar con los payloads del workload (10 KB livianas /
+2 MB pesadas). Para números exactos, exportá la serie del panel
+(*Inspect → Data → CSV*) o consultá la API de Prometheus directamente.
+
+### Test de sanidad (--trivial-test)
 
 ```bash
 ./scripts/correr_simulacion.sh --trivial-test

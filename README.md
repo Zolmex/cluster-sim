@@ -20,34 +20,128 @@ y extrapolación).
 Estructura del repo:
 
 ```
-Vagrantfile              4 VMs KVM (libvirt): coordinador + 3 workers heterogéneos
+Vagrantfile              4 VMs: coordinador + 3 workers heterogéneos (libvirt o VirtualBox)
 ansible/playbook.yml     Provision: paquetes, sod-worker.service, node_exporter, SimGrid
 worker.py / coordinador.py  Sistema real de tareas ZeroMQ (puertos 5555/5556)
 simulacion.py            Simulación SimGrid S4U (misma lógica, modelo calibrado)
 strategies.py            round_robin / least_loaded / power_of_two
-scripts/                 set_netem.sh (latencia) y correr_simulacion.sh (launcher SimGrid)
-monitoring/              Prometheus + Grafana autocontenidos (binarios en bin/, sin root)
+workload.py / monitoring/ scripts/   carga sintética / observabilidad / utilidades
 analisis_resultados.py   Notebook de análisis (celdas # %%): descriptiva, validación, escalado
 ```
 
 ---
 
-## 0. Requisitos previos (host Arch/Omarchy)
+## 0. Requisitos de software
 
-- Vagrant + plugin `vagrant-libvirt`, libvirt/KVM activos (`systemctl status libvirtd`).
-- Box `debian/bookworm64` para libvirt: `vagrant box add --provider libvirt debian/bookworm64`.
-- **Firewall**: el ufw del host bloquea por defecto el tráfico de los bridges de
-  libvirt (sin esto las VMs bootean pero NUNCA obtienen IP). Aplicar una vez:
+| Herramienta | Para qué | Dónde se instala |
+|---|---|---|
+| Vagrant ≥ 2.3 | levantar las VMs | host |
+| Plugin `vagrant-libvirt` *(Linux)* o VirtualBox ≥ 7 *(Windows)* | provider de las VMs | host |
+| libvirt + QEMU/KVM *(Linux)* | hipervisor | host |
+| Ansible ≥ 2.12 | provision de las VMs | host (o dentro con `ansible_local`) |
+| Python ≥ 3.10 + pip/venv | SimGrid, análisis | host y guests |
+| SimGrid 4.1 (pip) | simulación S4U | `.venv-simgrid/` del repo |
+| pandas/numpy/matplotlib/scipy/jinja2/jupytext | análisis | `.venv/` del repo |
+| Prometheus + Grafana | monitoreo | host — **opciones en §4** (los binarios de `monitoring/bin/` son solo una de ellas) |
+| rsync + git | synced folder y clonar el repo | host |
 
-  ```bash
-  sudo ufw allow in on virbr1     # red de gestión de vagrant-libvirt (192.168.121.0/24)
-  sudo ufw allow in on virbr2     # red del laboratorio cluster-sim (192.168.56.0/24)
-  sudo ufw route allow in on virbr1   # salida a internet de los guests
-  sudo ufw route allow in on virbr2
-  ```
+> Los binarios de `monitoring/bin/` **no son obligatorios**: son la opción
+> cero-configuración para no depender de paquetes del sistema. Si ya tenés
+> Prometheus/Grafana por otro lado, podés usarlos igual (§4, opción B).
+> Esa carpeta está en `.gitignore`: en un clon fresco no existe.
 
-- Dos venvs ya creados en el repo (si no, ver §3 y §5):
-  `.venv-simgrid/` (SimGrid) y `.venv/` (análisis).
+---
+
+## 1. Instalación por sistema operativo
+
+### 1.1 Linux — Arch (incluye Omarchy)
+
+```bash
+sudo pacman -S --needed vagrant libvirt qemu-base virt-manager dnsmasq ansible rsync
+sudo usermod -aG libvirt "$USER"   # re-login para que aplique
+sudo systemctl enable --now libvirtd
+vagrant plugin install vagrant-libvirt
+```
+
+- Python/pip: ya viene con el sistema; usar venvs (no instales nada con pip
+  global: Arch es PEP 668 "externally-managed").
+- Firewall ufw (si lo usás): ver §2.
+
+### 1.2 Linux — Debian / Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y vagrant libvirt-daemon-system libvirt-clients virtinst \
+                    dnsmasq-base ansible rsync python3-venv build-essential \
+                    ruby-dev libvirt-dev zlib1g-dev pkg-config
+sudo usermod -aG libvirt "$USER"   # re-login
+sudo systemctl enable --now libvirtd
+# Debian trae el plugin como paquete; si no existe, instalarlo con vagrant:
+sudo apt install -y vagrant-libvirt || vagrant plugin install vagrant-libvirt
+```
+
+### 1.3 Linux — Fedora
+
+```bash
+sudo dnf install -y @virtualization vagrant ansible rsync \
+                    gcc ruby-devel libvirt-devel zlib-devel
+sudo usermod -aG libvirt "$USER"   # re-login
+sudo systemctl enable --now libvirtd
+vagrant plugin install vagrant-libvirt
+```
+
+### 1.4 Windows
+
+**Recomendado: WSL2 (Ubuntu)** — así corren *todos* los componentes igual que
+en Linux (libvirt funciona dentro de WSL2 con virtualización anidada):
+
+1. En PowerShell (admin): `wsl --install -d Ubuntu-22.04` y reiniciar.
+2. Habilitar virtualización anidada (una vez, PowerShell admin):
+   `Set-VMProcessor -ExposeVirtualizationExtensions $true` no aplica en WSL2;
+   en su lugar verificar: `wsl -e ls /dev/kvm` (debe existir; requiere
+   Hyper-V/"Virtual Machine Platform" activo, que el `wsl --install` ya habilita).
+3. Dentro de WSL2 seguir la sección **1.2 (Debian/Ubuntu)** completa.
+4. `git clone` el repo **dentro del filesystem de WSL** (~/…), no en /mnt/c
+   (el rsync synced folder es mucho más rápido ahí).
+
+**Alternativa: VirtualBox nativo** (sin WSL):
+
+1. Instalar [Vagrant](https://developer.hashicorp.com/vagrant/downloads) y
+   [VirtualBox](https://www.virtualbox.org/) para Windows.
+2. Descomentar el bloque `config.vm.provider :virtualbox` del final del
+   `Vagrantfile` y usar el box con ese provider:
+   `vagrant box add bento/debian-12` + `vagrant up --provider=virtualbox`.
+3. Cambiar el provisioner a `ansible_local` (Ansible no corre nativo en
+   Windows): en el `Vagrantfile`, `config.vm.provision 'ansible'` →
+   `'ansible_local'`.
+4. Prometheus/Grafana: Docker Desktop o binarios de Windows (§4).
+5. SimGrid y el análisis: hacerlos dentro de WSL2 igualmente (compilar
+   SimGrid nativamente en Windows es frágil).
+
+**Diferencias Windows/Linux a saber:**
+- `scripts/set_netem.sh` usa `tc/netem` **dentro de las VMs** (que son
+  Debian): funciona igual en ambos casos — el host no interviene.
+- El firewall del host (§2) no aplica en Windows: VirtualBox/WSL2 NAT no lo
+  necesita.
+- Si usás Docker Desktop en Windows, montá el repo en el contenedor o apuntá
+  los configs por ruta absoluta (§4 opción B).
+
+---
+
+## 2. Firewall del host (solo Linux con libvirt)
+
+El firewall (ufw en Arch/Omarchy, o el que uses en Debian/Fedora) bloquea por
+defecto el tráfico de los bridges de libvirt: sin esto las VMs bootean pero
+**NUNCA obtienen IP**. Aplicar una vez:
+
+```bash
+sudo ufw allow in on virbr1        # red de gestión de vagrant-libvirt (192.168.121.0/24)
+sudo ufw allow in on virbr2        # red del laboratorio (192.168.56.0/24)
+sudo ufw route allow in on virbr1  # salida a internet de los guests
+sudo ufw route allow in on virbr2
+# Debian/Fedora con firewalld:
+sudo firewall-cmd --zone=libvirt --add-service=libvirt --permanent && sudo firewall-cmd --reload
+```
 
 > Síntoma de firewall mal configurado: `vagrant up` queda en
 > "Waiting for domain to get an IP address..." y no hay leases en
@@ -55,14 +149,15 @@ analisis_resultados.py   Notebook de análisis (celdas # %%): descriptiva, valid
 
 ---
 
-## 1. Levantar las VMs (Vagrant + Ansible)
+## 3. Levantar las VMs (Vagrant + Ansible)
 
 ```bash
 vagrant up                 # 4 VMs + provision Ansible al final (limit=all, una vez)
-vagrant status             # coordinador, worker-1/2/3 -> running (libvirt)
+vagrant status             # coordinador, worker-1/2/3 -> running
 ```
 
-Topología (red privada del lab `192.168.56.0/24`, gestión `192.168.121.0/24`):
+Topología (red privada del lab `192.168.56.0/24`, gestión `192.168.121.0/24`
+con libvirt; VirtualBox usa su host-only net):
 
 | VM | IP del lab | Recursos |
 |---|---|---|
@@ -79,44 +174,64 @@ vagrant-libvirt no configura eth1 en el guest; crearla a mano en cada VM
 
 ```bash
 vagrant ssh coordinador --command "sudo bash -c 'ip addr add 192.168.56.10/24 dev eth1 2>/dev/null; ip link set eth1 up; printf \"auto eth1\niface eth1 inet static\n    address 192.168.56.10\n    netmask 255.255.255.0\n\" > /etc/network/interfaces.d/eth1'"
-# y el mismo patrón con .11/.12/.13 en worker-1/2/3 (verificar con: ip -br a show eth1)
+# mismo patrón con .11/.12/.13 en worker-1/2/3; verificar: ip -br a show eth1
 ```
 
-**Provision:** se ejecuta automáticamente al final del primer `vagrant up`
-(instala rsync, python3-pip, iperf3, prometheus-node-exporter, unit
-`sod-worker.service` en los 3 workers, y SimGrid en el coordinador).
-Re-corrida manual: `vagrant provision`.
-Si falla por caché APT vieja: `vagrant ssh worker-N --command 'sudo apt-get update'`
-y repetir `vagrant provision`.
+**Provision:** corre automático al final del primer `vagrant up` (instala
+rsync, python3-pip, iperf3, prometheus-node-exporter, unit `sod-worker.service`
+en los workers y SimGrid en el coordinador). Re-corrida manual:
+`vagrant provision`. Si falla por caché APT vieja:
+`vagrant ssh worker-N --command 'sudo apt-get update'` y repetir.
 
 Apagar / limpiar:
 
 ```bash
-vagrant halt        # apaga (conserva provision e in-guest config) — usar para pausar
+vagrant halt        # pausa (conserva provision y config in-guest) — para pausar
 vagrant destroy -f  # BORRA todo: hay que re-configurar eth1 y provisionar de nuevo
 ```
 
 ---
 
-## 2. Monitoreo con Prometheus + Grafana
+## 4. Monitoreo con Prometheus + Grafana
 
-Prometheus (puerto 9090) scrapea el `node_exporter` (:9100) de cada VM por la
-red del lab; Grafana (puerto 3000) lo visualiza. Ambos corren en el **host**
-con binarios autocontenidos en `monitoring/bin/` (sin root ni docker):
+Prometheus (puerto 9090) scrapea el `node_exporter` (:9100) de cada VM;
+Grafana (puerto 3000) lo visualiza. Todo corre en el **host**. Los binarios
+de `monitoring/bin/` son solo **una** de las tres formas de proveerlos:
+
+**Opción A — autocontenidos (recomendada, sin root ni docker):**
 
 ```bash
-vagrant up                          # los targets están en las VMs: sin VMs no hay datos
-./monitoring/start_monitoring.sh    # levanta ambos y espera health-check
+./monitoring/get_binaries.sh        # una vez: descarga Prometheus + Grafana (~570 MB)
+vagrant up                          # los targets están en las VMs
+./monitoring/start_monitoring.sh    # levanta ambos + health-check
 ./monitoring/stop_monitoring.sh     # los detiene
 ```
 
-- **Grafana**: <http://localhost:3000> → carpeta **SOD** → dashboard
-  *"Clúster SOD — monitoreo en vivo"* (login anónimo con rol Admin, ya
-  provisionado). Paneles: CPU por nodo, RAM por nodo, tráfico en eth1
-  (red del lab) y load1, con auto-refresh de 5 s.
-- **Prometheus**: <http://localhost:9090> (consultas PromQL directas).
+**Opción B — tus propias instalaciones** (paquetes de distro, Docker, binarios
+propios): lo único obligatorio es que usen **los mismos configs** del repo:
 
-Provisioning automático (se aplica al arrancar Grafana):
+```bash
+# Prometheus (cualquier instalación):
+prometheus --config.file=monitoring/prometheus.yml --storage.tsdb.path=/tmp/prom-data
+# Grafana: apuntar GF_PATHS_PROVISIONING al repo para auto-provisionar datasource+dashboard:
+GF_PATHS_DATA=~/.grafana-data GF_PATHS_PROVISIONING="$(pwd)/monitoring/grafana/provisioning" \
+    grafana server --homepath /usr/share/grafana     # ruta según instalación
+# Docker (en el repo):
+docker run -d -p 9090:9090 -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml" prom/prometheus
+docker run -d -p 3000:3000 -e GF_PATHS_PROVISIONING=/provisioning \
+    -v "$PWD/monitoring/grafana/provisioning:/provisioning" \
+    -v "$PWD/monitoring/grafana/dashboards:/dashboards" grafana/grafana
+```
+
+**Lo que vas a ver:**
+
+- **Grafana** <http://localhost:3000> → carpeta **SOD** → dashboard
+  *"Clúster SOD — monitoreo en vivo"* (login anónimo Admin, ya provisionado).
+  Paneles: CPU por nodo, RAM, tráfico en eth1 (red del lab) y load1, con
+  auto-refresh de 5 s.
+- **Prometheus** <http://localhost:9090> (PromQL directo).
+
+Provisioning automático (lo lee Grafana al arrancar):
 
 ```
 monitoring/prometheus.yml                         targets del clúster (scrape 5 s)
@@ -125,18 +240,18 @@ monitoring/grafana/provisioning/dashboards/       registra monitoring/grafana/da
 monitoring/grafana/dashboards/sod-cluster.json    el dashboard
 ```
 
-Verificar targets: en Prometheus → *Status → Targets*, o ver el resumen que
-imprime `start_monitoring.sh` (los 4 deben estar `up`).
+Verificar targets: Prometheus → *Status → Targets*, o el resumen que imprime
+`start_monitoring.sh` (los 4 deben estar `up`; `down` = VMs apagadas o firewall).
 
 ---
 
-## 3. Ejecutar la simulación con SimGrid
+## 5. Ejecutar la simulación con SimGrid
 
 El launcher `scripts/correr_simulacion.sh` usa el venv dedicado
 `.venv-simgrid` (bindings S4U de SimGrid 4.1). Si no existe:
 
 ```bash
-python -m venv .venv-simgrid
+python3 -m venv .venv-simgrid
 .venv-simgrid/bin/pip install pybind11==2.13.6 cmake setuptools wheel
 .venv-simgrid/bin/pip install --no-build-isolation simgrid
 ```
@@ -158,8 +273,8 @@ coincidir con el analítico (`error relativo: 0.0% -> OK`) y la fila queda en
     --latency 20 --seed 42 --platform plataforma_base.xml
 ```
 
-**Lotes automáticos** (SimGrid admite un Engine por proceso, así que cada
-combinación va en un subproceso):
+**Lotes automáticos** (SimGrid admite un Engine por proceso: cada combinación
+va en un subproceso):
 
 ```bash
 ./scripts/correr_simulacion.sh --batch-all --batch-mode validacion      # n=3, 45 corridas
@@ -170,12 +285,12 @@ Salidas: filas con el esquema
 `env,scenario_id,strategy,n_workers,latency_ms,seed,makespan_s,
 throughput_tps,mean_wait_s,load_imbalance_cv,control_messages`.
 
-> Nota: los backtraces de pybind11 al final del proceso son ruido de
-> teardown, no errores; el criterio de éxito es `-> OK`.
+> Los backtraces de pybind11 al final del proceso son ruido de teardown, no
+> errores; el criterio de éxito es `-> OK`.
 
 ---
 
-## 4. Experimento REAL en el clúster (emulación)
+## 6. Experimento REAL en el clúster (emulación)
 
 El sistema real usa ZeroMQ: los workers corren como servicio systemd y el
 coordinador se lanza por corrida.
@@ -193,8 +308,8 @@ vagrant ssh coordinador --command 'nohup python3 /opt/sod_cluster/coordinador.py
 vagrant ssh coordinador --command 'tail -5 /tmp/run_rr_1_42.log; cat /tmp/run_rr_1_42.csv'
 ```
 
-La corrida termina sola (~30 s: despacha 100 tareas, espera resultados,
-manda STOP y escribe el CSV). Conviene **acumular** las filas en
+La corrida termina sola (~30 s: despacha 100 tareas, espera resultados, manda
+STOP y escribe el CSV). Conviene **acumular** las filas en
 `data/resultados_reales.csv` del host (escribir el header una vez).
 
 Parámetros del diseño: 3 estrategias × 3 latencias (1/20/100 ms) × 5 semillas
@@ -203,7 +318,7 @@ Parámetros del diseño: 3 estrategias × 3 latencias (1/20/100 ms) × 5 semilla
 **Gotchas:**
 
 - En el log deben verse `[REG] worker-N (control: tcp://192.168.56.1x:5556)`.
-  Si aparecen IPs `192.168.121.x` el worker cacheó la IP de gestión
+  Si aparecen IPs `192.168.121.x`, el worker cacheó la IP de gestión
   (`worker.py:get_local_ip` corre una vez al arrancar): fix con
   `vagrant ssh worker-N --command 'sudo systemctl restart sod-worker'`.
 - El netem es global (afecta a las 4 VMs): el bucle de la campaña va por
@@ -212,15 +327,14 @@ Parámetros del diseño: 3 estrategias × 3 latencias (1/20/100 ms) × 5 semilla
 
 ---
 
-## 5. Ejecutar el notebook de análisis
+## 7. Ejecutar el notebook de análisis
 
-`analisis_resultados.py` está escrito en formato "percent" (celdas `# %%`).
-Se convierte a Jupyter y se ejecuta con el venv de análisis (el python del
-sistema no permite pip, PEP 668):
+`analisis_resultados.py` está en formato "percent" (celdas `# %%`). Se
+convierte a Jupyter y corre con el venv de análisis:
 
 ```bash
 # venv + kernel (una vez):
-python -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install pandas numpy matplotlib scipy jinja2 jupytext nbformat nbconvert ipykernel
 .venv/bin/python -m ipykernel install --user --name cluster-sim --display-name "Python (cluster-sim)"
 
@@ -235,7 +349,7 @@ python -m venv .venv
 .venv/bin/jupyter lab analisis_resultados.ipynb   # kernel "Python (cluster-sim)"
 ```
 
-Qué produce (todo a 300 DPI, estilo APA, etiquetas en español):
+Qué produce (300 DPI, estilo APA, etiquetas en español):
 
 1. Tabla descriptiva del clúster real (media, DE, IC 95% con t de Student).
 2. Barras agrupadas con IC 95%: efecto de la latencia sobre cada estrategia.
@@ -245,20 +359,20 @@ Qué produce (todo a 300 DPI, estilo APA, etiquetas en español):
 5. Export: `figuras/*.png` y `tablas/*.{csv,tex}`.
 
 **Importante:** si los CSV de `data/` no existen, la primera celda genera
-**datos sintéticos** para que el pipeline sea ejecutable de inmediato.
-Cuando haya datos reales, ponerlos en `data/resultados_reales.csv`,
+**datos sintéticos** para que el pipeline sea ejecutable de inmediato. Cuando
+haya datos reales, ponerlos en `data/resultados_reales.csv`,
 `data/resultados_simgrid_val.csv` y `data/resultados_simgrid_scale.csv`
-(con el esquema del §3) y el análisis corre sobre ellos sin cambiar nada.
+(esquema del §5) y el análisis corre sobre ellos sin cambiar nada.
 
 ---
 
-## 6. Reset del experimento
+## 8. Reset del experimento
 
 ```bash
 rm -f data/*.csv && rm -rf figuras tablas analisis_resultados.ipynb
-# resultados_simulacion.csv (raíz) puede conservar filas de corridas:
-# para dejarlo "en blanco" quedarse solo con la cabecera.
-vagrant halt     # pausa;  vagrant destroy -f borra TODO (ver §1: re-configurar eth1)
+# resultados_simulacion.csv (raíz) acumula corridas: para dejarlo "en blanco"
+# quedarse solo con la cabecera.
+vagrant halt     # pausa;  vagrant destroy -f borra TODO (ver §3: re-configurar eth1)
 ```
 
 ---

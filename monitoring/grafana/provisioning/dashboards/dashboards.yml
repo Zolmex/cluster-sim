@@ -7,6 +7,6 @@ providers:
     disableDeletion: false
     updateIntervalSeconds: 10
     options:
-      # RENDEREADO por start_monitoring.sh con la ruta absoluta del repo
+      # RENDERIZADO por start_monitoring.sh con la ruta absoluta del repo
       # (Grafana no expande ~ ni variables en provisioning).
       path: /home/zolmex/Documents/Git/cluster-sim/monitoring/grafana/dashboards

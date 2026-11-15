@@ -23,6 +23,19 @@ PIDS="$REPO/monitoring/.pids"
 mkdir -p "$LOGS" "$PIDS" "$REPO/monitoring/data-prom"
 
 # --- 1) Extraer los tarballs la primera vez ---------------------------------
+if [ ! -f "$BIN/prometheus.tar.gz" ] || [ ! -f "$BIN/grafana.tar.gz" ]; then
+    cat >&2 <<'AVISO'
+
+ERROR: faltan los tarballs en monitoring/bin/ (opción autocontenida).
+
+Dos caminos:
+  a) ./monitoring/get_binaries.sh   # descarga Prometheus + Grafana (~570 MB)
+  b) usar tus propias instalaciones: ver README.md §4 (paquetes de distro,
+     Docker o binarios propios apuntando a los mismos configs).
+
+AVISO
+    exit 1
+fi
 if [ ! -x "$BIN"/prometheus-*/prometheus ] 2>/dev/null; then
     echo "==> Extrayendo Prometheus..."
     tar -xzf "$BIN/prometheus.tar.gz" -C "$BIN"

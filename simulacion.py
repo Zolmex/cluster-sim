@@ -69,6 +69,7 @@ PLATAFORMA_DEFECTO = os.path.join(RUTA_SCRIPT, "plataforma_base.xml")
 
 CONTROL_BYTES = 64      # mensajes de control: REGISTER, ACK, STATUS, RESULT
 STOP_BYTES = 16         # centinela de cierre (no contabiliza como control)
+TIMEOUT_STATUS_S = 0.150  # timeout de ConsultaCargas en coordinador.py (ms->s)
 UNIDADES_TRIVIAL = 1_000_000   # tarea de verificación (= BENCHMARK_UNITS de worker.py)
 
 ANCHO_BANDA = "3062MBps"  # ancho de banda de los enlaces dedicados
@@ -84,7 +85,7 @@ SPEED_LENTO = "7.61Mf"        # worker-3: 1 slot dentro del cgroup CPUQuota=50%
 
 # Estado compartido entre actores S4U de una MISMA corrida (los actores Python
 # corren en hilos reales; el GIL hace atómicas las lecturas/escrituras simples).
-_ESTADO = {"busy": {}}   # worker_id -> ¿está ejecutando una tarea?
+_ESTADO = {"busy": {}, "hechas": {}}  # por worker: ¿ejecuta? / tareas terminadas
 _RESULTADO = {}          # fila CSV (+ extras) que produce el actor coordinador
 _CSV_LOCK = threading.Lock()
 
@@ -127,9 +128,14 @@ def _actor_worker(worker_id: str, cfg: dict):
         finished_at = simgrid.Engine.clock
         _ESTADO["busy"][worker_id] = False
         hechas += 1
+        _ESTADO["hechas"][worker_id] = hechas
 
-        # 3) RESULT: envío no bloqueante (como dealer.send_json de worker.py)
-        resultados.put_async(
+        # 3) RESULT: por el buzón PROPIO del worker (como la conexión DEALER
+        #    de worker.py: cada worker tiene su canal independiente hacia el
+        #    coordinador). Un buzón compartido serializaría las transferencias
+        #    de todos los workers (limitación del modelo de Mailbox de
+        #    SimGrid), añadiendo n x latencia fantasma al makespan.
+        simgrid.Mailbox.by_name(f"resultados-{worker_id}").put_async(
             {"type": "RESULT", "task_id": tarea["task_id"], "worker": worker_id,
              "started_at": started_at, "finished_at": finished_at},
             cfg["result_bytes"])
@@ -151,9 +157,18 @@ def _actor_control(worker_id: str):
         peticion = canal.get()
         if peticion == "STOP":         # cierre limpio del canal de control
             break
-        carga = 1 if _ESTADO["busy"].get(worker_id) else 0
-        simgrid.Mailbox.by_name(peticion["reply_to"]).put(
-            {"worker_id": worker_id, "queue": 0, "running": carga}, CONTROL_BYTES)
+        running = 1 if _ESTADO["busy"].get(worker_id) else 0
+        # Cola pendiente como el worker real (estado.tareas.qsize()):
+        # tareas despachadas que aún no terminó (en vuelo + en cola), menos
+        # la que está ejecutando. Sin esto las estrategias verian siempre
+        # carga 0 y acumularian todo en el primer worker por desempate.
+        pendiente = max(0, _ESTADO["enviadas"].get(worker_id, 0)
+                        - _ESTADO["hechas"].get(worker_id, 0) - running)
+        # put_async: si el coordinador desarma la recepción (timeout), la
+        # respuesta queda en el buzón sin bloquear este actor REP.
+        simgrid.Mailbox.by_name(peticion["reply_to"]).put_async(
+            {"worker_id": worker_id, "queue": pendiente, "running": running},
+            CONTROL_BYTES)
 
 
 def _actor_coordinador(cfg: dict):
@@ -173,20 +188,56 @@ def _actor_coordinador(cfg: dict):
             "REGISTER_ACK", CONTROL_BYTES)
 
     # 2) Estrategia compartida (strategies.py) con canal de control simulado
-    rep_status = simgrid.Mailbox.by_name("status-reply-coord")
+    # Un buzón de respuesta POR CONSULTA: espeja el REQ/REP de coordinador.py,
+    # donde cada consulta usa su socket y el _reset tras un timeout DESCARTA
+    # la respuesta rezagada (no la consume la consulta siguiente). Los buzones
+    # con respuesta huérfana se drenan al cierre (ver más abajo).
+    reps_status = {}
+    consultas = {w: 0 for w in worker_ids}
+    huerfanas = []                            # buzones con respuesta en vuelo
+    last_known = {w: 0 for w in worker_ids}   # como ConsultaCargas.last_known
+    _ESTADO["enviadas"] = {w: 0 for w in worker_ids}
 
     def get_loads(ids):
         """Callback de estrategias: consulta STATUS worker a worker (REQ/REP).
 
-        Cada consulta cuesta un ida y vuelta de 64 B por los enlaces simulados:
-        exactamente el coste de red del canal 5556 del clúster real.
+        Espeja ConsultaCargas de coordinador.py: envío NO bloqueante y poll
+        con timeout de 150 ms. Las consultas se envían TODAS de golpe (como
+        ZeroMQ buferea en el socket) y las respuestas se esperan con test(),
+        así el coste por decisión es el RTT real (~2 x latencia) en vez de
+        timeout x n_workers secuencial. Si una respuesta no llega a tiempo, se
+        usa la última carga conocida y la respuesta rezagada se descarta
+        (como el _reset del socket real). El coste por consulta es
+        min(RTT, timeout): a 100 ms de latencia cada consulta expira a los
+        150 ms aunque el RTT sea 200 ms, como en el clúster real.
         """
         cargas = {}
+        pendientes = {}   # wid -> comm de respuesta
+        reply_mb_por = {}  # wid -> buzón de respuesta (para drenar huérfanas)
         for wid in ids:
-            simgrid.Mailbox.by_name(f"status-{wid}").put(
-                {"type": "STATUS", "reply_to": rep_status.name}, CONTROL_BYTES)
-            respuesta = rep_status.get()
-            cargas[wid] = respuesta["queue"] + respuesta["running"]
+            consultas[wid] += 1
+            reply_mb = simgrid.Mailbox.by_name(
+                f"status-reply-{wid}-{consultas[wid]}")
+            reply_mb_por[wid] = reply_mb
+            simgrid.Mailbox.by_name(f"status-{wid}").put_async(
+                {"type": "STATUS", "reply_to": reply_mb.name}, CONTROL_BYTES)
+            pendientes[wid] = reply_mb.get_async()
+        # Espera activa (como poller.poll sobre el ROUTER real) con timeout.
+        t0 = simgrid.Engine.clock
+        while pendientes and simgrid.Engine.clock - t0 < TIMEOUT_STATUS_S:
+            for wid in list(pendientes):
+                comm = pendientes[wid]
+                if comm.test():
+                    r = comm.get_payload()
+                    last_known[wid] = r["queue"] + r["running"]
+                    del pendientes[wid]
+            if pendientes:
+                simgrid.this_actor.sleep_for(0.001)
+        for wid, comm in pendientes.items():
+            comm.cancel()          # como _reset: descarta la recepción
+            huerfanas.append(reply_mb_por[wid])
+        for wid in ids:
+            cargas[wid] = last_known[wid]
         return cargas
 
     bal = strategies.create(cfg["strategy"], worker_ids,
@@ -208,23 +259,67 @@ def _actor_coordinador(cfg: dict):
     completadas = 0
     t_first = None
 
-    # 4) Despacho del lote. put() es síncrono (bloquea hasta entregar): captura
-    #    la saturación del coordinador a gran escala igual que el envío real.
+    # 4) Despacho del lote. put_async: el despacho por ZeroMQ (dealer.send_json)
+    #    es NO bloqueante (buferea en el socket); el bloqueo real ocurre en las
+    #    estrategias con consulta de estado (select -> get_loads). Con put()
+    #    síncrono el sim serializaba una transferencia completa por tarea, que
+    #    el clúster real no paga (por eso RR con latencia salía ~5x peor).
     for t in tasks:
-        wid = bal.select(t["task_id"])      # puede bloquear en STATUS
+        wid = bal.select(t["task_id"])      # puede bloquear en STATUS (REQ/REP)
         if t_first is None:
             t_first = simgrid.Engine.clock
-        datos[wid].put(t, t["payload_bytes"])
+        # put_async: el envío por DEALER no bloquea al coordinador (ZeroMQ
+        # buferea); los comms quedan en cola del buzón y el worker los consume
+        # de a uno, con la transferencia solapada con el cómputo en curso.
+        datos[wid].put_async(t, t["payload_bytes"])
+        _ESTADO["enviadas"][wid] += 1
 
-    # 5) Confirmaciones de finalización (RESULT)
-    while completadas < len(tasks):
-        r = simgrid.Mailbox.by_name("resultados").get()
-        completadas += 1
+    # Buzón de resultado POR worker (conexión DEALER independiente, como el
+    # ROUTER real) con una recepción SIEMPRE armada: así la transferencia del
+    # RESULT arranca en cuanto el worker la envía y los canales de workers
+    # distintos transfieren EN PARALELO (el buzon compartido los serializaba).
+    res_mb = {w: simgrid.Mailbox.by_name(f"resultados-{w}") for w in worker_ids}
+    pendientes = {}
+    if len(tasks) > 1:
+        pendientes = {w: res_mb[w].get_async() for w in worker_ids}
+
+    # 5) Confirmaciones de finalización (RESULT).
+    if len(tasks) == 1:
+        # Trivial: recepción bloqueante exacta (sin sondeo, error <0.1%).
+        r = res_mb[worker_ids[0]].get()
+        completadas = 1
         waits.append(r["started_at"] - created[r["task_id"]])
         active[r["worker"]] += r["finished_at"] - r["started_at"]
+    else:
+        # Sondeo con test() sobre cada canal (como poller.poll(0) del ROUTER
+        # real). Con N>1 tareas siempre hay al menos un resultado pendiente,
+        # así que el bucle avanza; sleep_for(1ms) solo cuando ningún canal
+        # tiene mensaje listo (todos los workers computando).
+        while completadas < len(tasks):
+            avanzo = False
+            for wid, comm in pendientes.items():
+                if comm.test():
+                    r = comm.get_payload()
+                    pendientes[wid] = res_mb[wid].get_async()
+                    completadas += 1
+                    waits.append(r["started_at"] - created[r["task_id"]])
+                    active[r["worker"]] += r["finished_at"] - r["started_at"]
+                    avanzo = True
+            if not avanzo:
+                simgrid.this_actor.sleep_for(0.001)   # granularidad 1 ms
     t_last = simgrid.Engine.clock
 
-    # 6) Cierre limpio: STOP por el canal de datos y por el de control
+    # 6) Cierre limpio. Primero se CANCELAN las respuestas STATUS huérfanas
+    #    (su consulta expiró y su receptor se desarmó): las respuestas que
+    #    llegaron quedan en el buzón sin consumidor; cancelar las descarta,
+    #    igual que el _reset del socket REP real. Quedarlas pendientes haría
+    #    que el motor reportara actividades sin final al apagarse.
+    #    Ocurre tras t_last: no afecta las métricas.
+    for mb in huerfanas:
+        comm = mb.get_async()
+        comm.cancel()
+
+    # STOP por el canal de datos y por el de control
     for wid in worker_ids:
         datos[wid].put("STOP", STOP_BYTES)
         simgrid.Mailbox.by_name(f"status-{wid}").put("STOP", STOP_BYTES)
@@ -304,11 +399,19 @@ def _construir_plataforma_programatica(e: "simgrid.Engine", cfg: dict):
 # ---------------------------------------------------------------------------
 def ejecutar_corrida(cfg: dict) -> dict:
     """Crea el Engine, la plataforma (XML o programática) y los actores; simula."""
-    _ESTADO["busy"] = {}
+    _ESTADO.clear()
+    _ESTADO.update(busy={}, hechas={}, enviadas={})
     _RESULTADO.clear()
 
     # SimGrid solo admite un Engine por proceso => --batch-all usa subprocesos.
-    e = simgrid.Engine(["simulacion.py"])
+    # FACTORES DE RED: los defaults del modelo CM02 aplican un latency_factor
+    # de 13.01 (tuning heredado de SMPI) que multiplicaba TODA latencia x13,
+    # inflando los makespans ~26x por tarea (ver README 5.2). En un clúster
+    # de LAN sin crosstraffic el factor es 1: el RTT simulado = 2 x latencia,
+    # exactamente como netem en el clúster real.
+    e = simgrid.Engine(["simulacion.py",
+                        "--cfg=network/latency-factor:1",
+                        "--cfg=network/bandwidth-factor:1"])
 
     if cfg.get("platform"):
         # Modo validación: XML calibrado + latencia sobreescrita por --latency
@@ -433,9 +536,16 @@ def run_batch(args):
         plataforma = args.platform or (
             PLATAFORMA_DEFECTO if os.path.exists(PLATAFORMA_DEFECTO) else None)
     else:
-        # 3 estrategias x 4 escalas (16/64/256/512), latencia de laboratorio (1 ms)
-        combos = [(s, n, 1.0, workload.DEFAULT_SEED)
-                  for n in (16, 64, 256, 512) for s in strategies.STRATEGIES]
+        # 3 estrategias x 4 escalas (16/64/256/512), latencia de laboratorio
+        # (1 ms). least_loaded consulta a TODOS los workers por cada tarea
+        # (O(tareas x workers)): ya se ve su saturacion a n=64, por lo que a
+        # 256/512 solo se miden round_robin y power_of_two (escalan bien).
+        combos = []
+        for n in (16, 64, 256, 512):
+            estrategias_n = strategies.STRATEGIES if n <= 64 \
+                else ["round_robin", "power_of_two"]
+            for s in estrategias_n:
+                combos.append((s, n, 1.0, workload.DEFAULT_SEED))
         env_label = args.env_label or "simgrid_scale"
         plataforma = None
 

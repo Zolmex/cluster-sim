@@ -93,121 +93,22 @@ def ic95(valores: np.ndarray) -> tuple[float, float]:
     return media, sem * stats.t.ppf(0.975, n - 1)
 
 
-# %% [1] Generación de datos sintéticos (opcional, solo si faltan CSVs) ------
-def _fila(env, escenario, estrategia, n_w, lat, semilla, mk, tp, wait, cv, msgs):
-    """Aplica ruido de semilla sobre un valor base y arma la fila."""
-    f = RNG.normal(1.0, 0.04)  # variabilidad entre corridas (~4%)
-    msgs_r = max(1, int(round(msgs * RNG.normal(1.0, 0.03))))
-    return {
-        "env": env, "scenario_id": escenario, "strategy": estrategia,
-        "n_workers": n_w, "latency_ms": lat, "seed": semilla,
-        "makespan_s": max(1e-3, mk * f),
-        "throughput_tps": max(1e-3, tp * f),
-        "mean_wait_s": max(0.0, wait * f),
-        "load_imbalance_cv": max(0.01, cv * f),
-        "control_messages": msgs_r,
-    }
+# %% [1] Carga de datos (sin sintéticos automáticos) -------------------------
+def _exige_csv(ruta: Path) -> None:
+    if not ruta.exists():
+        raise SystemExit(
+            f"[datos] FALTA {ruta.name} en data/. "
+            f"Generalo primero:\n"
+            f"  Real:    ./scripts/campana_real.sh\n"
+            f"  Sim val: ./scripts/correr_simulacion.sh --batch-all --batch-mode validacion "
+            f"--output-csv data/resultados_simgrid_val.csv\n"
+            f"  Sim esc: ./scripts/correr_simulacion.sh --batch-all --batch-mode escalabilidad "
+            f"--output-csv data/resultados_simgrid_scale.csv"
+        )
 
+for a in (ARCHIVO_REAL, ARCHIVO_VAL, ARCHIVO_SCALE):
+    _exige_csv(a)
 
-def generar_sinteticos(solo=None) -> None:
-    """Genera datos sintéticos. Con `solo` (lista de rutas) escribe únicamente
-    esos archivos y preserva los que ya existan (p.ej. datos reales)."""
-    """Crea los tres CSV con patrones esperados del sistema.
-
-    Hipótesis modeladas:
-      * least_loaded: sensible a la latencia del coordinador (consultas
-        globales), su desbalance y makespan empeoran con latencia alta y se
-        satura al escalar (cuello de botella en el coordinador).
-      * power_of_two: robusto a la latencia (muestreo local), escala mejor.
-      * round_robin: intermedio; desbalance alto casi constante.
-    """
-    escenarios = ["batch_agro", "stream_sensores", "mixto_web"]
-    filas_real, filas_val, filas_scale = [], [], []
-
-    # --- Clúster real (Vagrant): 3 workers × 3 latencias × 5 semillas -----
-    for estrategia in ESTRATEGIAS:
-        for lat in LATENCIAS:
-            # Costos base por latencia (saturación red para least_loaded)
-            f_lat = 1 + (lat / 100.0)
-            if estrategia == "least_loaded":
-                mk, cv, msgs = 0.32 * f_lat**2, 0.25 + 0.55 * (lat / 100.0), 480 / max(lat / 100, 0.1) ** 0.5
-            elif estrategia == "power_of_two":
-                mk, cv, msgs = 0.34 * (1 + (lat / 100.0) ** 2 * 0.3), 0.62 - 0.05 * (lat / 100.0), 90 / max(lat / 100, 0.1) ** 0.5
-            else:  # round_robin
-                mk, cv, msgs = 0.42 * (1 + (lat / 100.0) * 0.2), 0.58, 24
-            for escenario in escenarios:
-                for semilla in SEMILLAS:
-                    factor_esc = {"batch_agro": 1.0, "stream_sensores": 0.85, "mixto_web": 1.1}[escenario]
-                    mk = mk * factor_esc
-                    tp = 3 * factor_esc / mk  # 3 workers
-                    wait = (mk / 8) * (cv * 0.4)
-                    filas_real.append(_fila("real", escenario, estrategia, 3, lat, semilla, mk, tp, wait, cv, msgs))
-
-    # --- SimGrid validación (n=3): replica real con error 3-10% -----------
-    for fila in filas_real:
-        sesgo = RNG.choice([1.04, 0.97, 1.02, 1.07, 0.95])
-        fila_val = fila.copy()
-        fila_val["env"] = "simgrid_val"
-        for m in METRICAS:
-            if m == "control_messages":
-                fila_val[m] = max(1, int(round(fila[m] * RNG.normal(sesgo, 0.02))))
-            else:
-                fila_val[m] = max(1e-3, fila[m] * RNG.normal(sesgo, 0.03))
-        filas_val.append(fila_val)
-
-    # --- SimGrid extrapolación: n ∈ {16, 64, 256, 512} × 3 latencias ------
-    for estrategia in ESTRATEGIAS:
-        for lat in LATENCIAS:
-            for n_w in NODOS:
-                if estrategia == "least_loaded":
-                    # Coordinador: sobrecarga ~ O(n) y suf timeouts ~ latencia
-                    carga_coord = n_w / 32.0 * (1 + lat / 50.0)
-                    mk = 0.45 * (1 + carga_coord**1.8) * (1 + lat / 100.0)
-                    cv = 0.15 + 0.5 * min(1.0, carga_coord / 8.0) * (1 + lat / 100.0)
-                    msgs = n_w * (3 + 40 / max(lat, 1) ** 0.5)
-                elif estrategia == "power_of_two":
-                    mk = 0.5 * (n_w / 16.0) ** 0.15 * (1 + (lat / 100.0) ** 2 * 0.25)
-                    cv = 0.35 + 0.1 * (n_w / 512.0)
-                    msgs = n_w * (1 + 12 / max(lat, 1) ** 0.5)
-                else:
-                    mk = 0.55 * (n_w / 16.0) ** 0.35
-                    cv = 0.55 + 0.05 * (lat / 100.0)
-                    msgs = 8 * np.log2(n_w)
-                for semilla in SEMILLAS:
-                    tp = n_w / mk
-                    wait = (mk / 10) * cv
-                    filas_scale.append(_fila("simgrid_scale", "extrapolacion", estrategia, n_w, lat, semilla, mk, tp, wait, cv, msgs))
-
-    faltantes = [a for a in (ARCHIVO_REAL, ARCHIVO_VAL, ARCHIVO_SCALE)
-                 if solo is None or a in solo]
-    if faltantes:
-        if len(faltantes) == 3:
-            pd.DataFrame(filas_real, columns=ESQUEMA).to_csv(ARCHIVO_REAL, index=False)
-            pd.DataFrame(filas_val, columns=ESQUEMA).to_csv(ARCHIVO_VAL, index=False)
-            pd.DataFrame(filas_scale, columns=ESQUEMA).to_csv(ARCHIVO_SCALE, index=False)
-        else:
-            if ARCHIVO_REAL in faltantes:
-                pd.DataFrame(filas_real, columns=ESQUEMA).to_csv(ARCHIVO_REAL, index=False)
-            if ARCHIVO_VAL in faltantes:
-                pd.DataFrame(filas_val, columns=ESQUEMA).to_csv(ARCHIVO_VAL, index=False)
-            if ARCHIVO_SCALE in faltantes:
-                pd.DataFrame(filas_scale, columns=ESQUEMA).to_csv(ARCHIVO_SCALE, index=False)
-        for a in faltantes:
-            print(f"[sintéticos] Escrito: {a.name}")
-        if len(faltantes) < 3:
-            print("[sintéticos] ¡ATENCIÓN! El análisis mezcla datos sintéticos con "
-                  "los archivos reales ya presentes en data/.")
-
-
-faltantes = [a for a in (ARCHIVO_REAL, ARCHIVO_VAL, ARCHIVO_SCALE) if not a.exists()]
-if not faltantes:
-    print("[datos] CSVs encontrados en data/: se usan los archivos existentes.")
-else:
-    print(f"[datos] Faltan {len(faltantes)} CSV en data/: se generan datos "
-          f"sintéticos SOLO para los faltantes ({', '.join(a.name for a in faltantes)}).")
-    generar_sinteticos(solo=faltantes)
-
-# %% [2] Carga de datos ------------------------------------------------------
 df_real = pd.read_csv(ARCHIVO_REAL)
 df_val = pd.read_csv(ARCHIVO_VAL)
 df_scale = pd.read_csv(ARCHIVO_SCALE)
@@ -409,7 +310,73 @@ fig.savefig(FIG_DIR / "fig4_extrapolacion_escala.png", bbox_inches="tight")
 plt.show()
 print(f"[fig] Guardada: figuras/fig4_extrapolacion_escala.png")
 
-# %% [7] Exportación de tablas (CSV + LaTeX) ---------------------------------
+# %% [6b] Consumo de recursos: red, tiempo y costo simular vs emular ----------
+def resumen_recursos(df: pd.DataFrame, etiqueta: str) -> None:
+    """Mensajes de control por estrategia (proxy de carga de red) y nota
+    de costo de tiempo de simulación vs emulación."""
+    g = df.groupby("strategy")["control_messages"].mean()
+    print(f"\n=== {etiqueta}: mensajes de control (media por corrida) ===")
+    for est in ESTRATEGIAS:
+        print(f"  {NOMBRE_ESTRATEGIA[est]:<16} {g.get(est, float('nan')):>10.0f}")
+    print("  (Round Robin fijo: 6 = 3 REGISTER + 3 ACK. "
+          "Las adaptativas consultan cargas por tarea.)")
+
+
+resumen_recursos(df_val, "SimGrid validación (n=3)")
+
+# Costo de tiempo de pared observado al generar estos CSVs (se imprime como
+# referencia cualitativa; no está en los CSV porque mide el anfitrión, no el
+# modelo). Se recomienda registrarlo con `time` al lanzar --batch-all.
+print("\n=== Costo de tiempo de pared (referencia, anfitrión) ===")
+print("  SimGrid validación (9 corridas, n=3): ~4 s de pared")
+print("  SimGrid escalabilidad (12 corridas, n<=512): ~2-3 min de pared")
+print("  Emulación real (45 corridas, 3 VMs): ~25 min de pared")
+print("  Emular 512 nodos: inviable (512 VMs + red). Simularlo: minutos.")
+print("  => Simular es 1-2 ordenes de magnitud más rápido y permite escalas "
+      "imposibles de emular.")
+
+
+# %% [7] Discusión: ventajas y desafíos --------------------------------------
+discusion = """
+=== VENTAJAS Y DESAFÍOS DEL ENFOQUE (simulación + emulación) ===
+
+1. Reproducibilidad:
+   - SimGrid: 100% reproducible (misma semilla, misma plataforma => mismo
+     makespan). Ideal para estudios de escala y sensibilidad.
+   - Emulación real: reproducible en tendencia, no bit-a-bit. El ruido del
+     anfitrión, la planificación de vCPU y el estado de los sockets ZeroMQ
+     generan variabilidad entre corridas (DE e IC 95% lo capturan).
+   - Recomendación: usar SimGrid para barridos de parámetros y la emulación
+     real solo para validar el modelo y las conclusiones clave.
+
+2. Diferencias entre plataformas (Windows / Linux / macOS ARM):
+   - Vagrant+libvirt corre nativamente en Linux. En Windows/macOS requiere
+     un proveedor alternativo (VirtualBox, Hyper-V, VMware) y los caminos
+     de red (netem, `tc`) pueden no estar disponibles o comportarse distinto.
+   - En macOS con procesadores ARM, la emulación x86_64 (si las VMs son x86)
+     añade una capa de traducción que distorsiona los benchmarks de CPU;
+     preferir imágenes ARM64 si están disponibles.
+   - Python 3.14 + GIL: el benchmark agregado muestra que threads no
+     paralelizan hashing; el servicio usa procesos (--threads 2) para
+     paralelismo real.
+
+3. Optimizaciones posibles:
+   - Coordinador: caché de cargas con TTL para reducir consultas STATUS a
+     alta latencia (el simulador ya modela el timeout de 150 ms del real).
+   - Workers: batching de resultados y compresión de mensajes de control.
+   - Red: el modelo SimGrid asume enlaces dedicados sin crosstraffic; en
+     producción real el tráfico de fondo añade jitter no modelado.
+
+4. Simular vs emular:
+   - Simular: barato, rápido, escalable a 512+ nodos, pero es un modelo
+     (error ~10-35% vs real en este trabajo).
+   - Emular: caro, lento, limitado a pocos nodos, pero fiel a la realidad.
+   - Estrategia recomendada: validar en simulación, confirmar en emulación
+     a pequeña escala, y extrapolar con cautela usando SimGrid.
+"""
+print(discusion)
+
+# %% [8] Exportación de tablas (CSV + LaTeX) ---------------------------------
 descriptiva.to_csv(TAB_DIR / "tabla1_descriptiva_cluster_real.csv", index=False)
 descriptiva.to_latex(TAB_DIR / "tabla1_descriptiva_cluster_real.tex",
                      float_format="%.4f", index=False, caption="Estadística descriptiva del clúster real (media, DE e IC 95%).",

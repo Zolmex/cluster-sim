@@ -1,2 +1,1 @@
 env,scenario_id,strategy,n_workers,latency_ms,seed,makespan_s,throughput_tps,mean_wait_s,load_imbalance_cv,control_messages
-simgrid_val,batch_agro,round_robin,3,1.0,42,56.396585,1.773157,29.655813,0.532223,6

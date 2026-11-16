@@ -418,14 +418,37 @@ agregan solo las filas):
 
 ```bash
 mkdir -p data
-vagrant ssh coordinador --command 'cat /tmp/run_rr_1_42.csv' \
-  | (grep -q strategy data/resultados_reales.csv 2>/dev/null && tail -n +2 || cat) \
+vagrant ssh coordinador --command 'cat /tmp/run_rr_1_42.csv' 2>/dev/null \
+  | tr -d '\r' \
+  | { grep -q '^env,' data/resultados_reales.csv 2>/dev/null \
+        && awk -F, '$1=="real"' || cat; } \
   >> data/resultados_reales.csv
 ```
 
+> Dos guardas críticas: `vagrant ssh` **fusiona el stderr remoto con su
+> stdout**, así que sin filtro un error del `cat` remoto (p. ej. VM caída)
+> quedaría escrito como texto dentro del CSV; y el `grep '^env,'` decide si
+> hay que copiar también la cabecera (solo la primera vez). El script de
+> campaña de abajo hace ambas verificaciones por vos.
+
 **Campaña completa del diseño**: 3 estrategias × 3 latencias (1/20/100 ms) ×
 5 semillas (11, 42, 73, 101, 137) = **45 corridas** (~30-40 min en total).
-El netem es global, así que el bucle exterior va por latencia:
+Usá el script de campaña, que encapsula el bucle con guardas (verifica VMs y
+servicios antes de empezar, sondea el log en vez de dormir a ciegas, solo
+acumula filas válidas y es **reanudable**: saltea las combinaciones ya
+presentes en el CSV):
+
+```bash
+./scripts/campana_real.sh                     # campaña completa (45 corridas)
+# subconjuntos (útil para reanudar tras un corte):
+./scripts/campana_real.sh round_robin         # una estrategia (15 corridas)
+./scripts/campana_real.sh least_loaded --lat 1 --seed 11 42
+```
+
+Al terminar (o al cortar con Ctrl+C) el script limpia el qdisc solo.
+
+<details>
+<summary>Alternativa manual (el bucle equivalente, para entender qué hace el script)</summary>
 
 ```bash
 for lat in 1 20 100; do
@@ -438,8 +461,9 @@ for lat in 1 20 100; do
           --output-csv $out > ${out%.csv}.log 2>&1 & echo lanzado"
       sleep 45    # margen: la corrida dura ~30 s (más con latencia 100 ms)
       vagrant ssh coordinador --command "tail -1 ${out%.csv}.log"
-      vagrant ssh coordinador --command "cat $out" \
-        | (grep -q strategy data/resultados_reales.csv 2>/dev/null && tail -n +2 || cat) \
+      vagrant ssh coordinador --command "cat $out" 2>/dev/null \
+        | tr -d '\r' \
+        | (grep -q '^env,' data/resultados_reales.csv 2>/dev/null && tail -n +2 || cat) \
         >> data/resultados_reales.csv
       echo "==> done: $strat lat=${lat}ms seed=$seed"
     done
@@ -447,6 +471,12 @@ for lat in 1 20 100; do
 done
 ./scripts/set_netem.sh 0    # NUNCA olvidar: limpia el qdisc
 ```
+
+**Cuidado con la vía manual**: si una VM está caída, `vagrant ssh` no lanza
+el coordinador y la fila `cat` puede fallar; el `2>/dev/null | tr -d '\r'`
+evita que el mensaje de error se cuele como texto dentro del CSV. El script
+de arriba hace todas esas verificaciones por vos.
+</details>
 
 **Gotchas:**
 

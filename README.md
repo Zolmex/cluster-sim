@@ -339,7 +339,7 @@ vagrant ssh worker-1 --command 'ping -c 3 192.168.56.10'
 Anotá los valores medidos en `plataforma_base.xml` (su cabecera explica qué
 campo toca en cada caso). La clave de interpretación: el actor worker del
 sim ejecuta tareas **sequencialmente**, así que el `speed` de worker-1 es la
-velocidad **agregada** de sus 2 slots (30.5Mf), no la per-core (~15.2Mf).
+velocidad **agregada** de sus 2 slots (30.37Mf), no la per-core (~15.18Mf).
 Con `--flops-per-unit 1` (default), el speed del XML va directo en unidades/s.
 
 El dashboard de Grafana (§4) sirve acá para **validar el modelo**: worker-3

@@ -29,7 +29,8 @@
        (La opcion latency de simulacion.py tambien sobreescribe este valor
        dinamicamente en tiempo de ejecucion.)
     3) Ancho de banda (bandwidth): medir con iperf3 entre VMs. SimGrid espera
-       bytes/s: bandwidth = Mbps_medidos / 8 (p. ej. 940 Mbps ~ "117.5MBps").
+       bytes/s: valor medido en Gbps ÷ 8 × 1000 = MBps (p. ej. 24.5 Gbps =
+       3062 MBps, escribir "3062MBps").
 -->
 <platform version="4.1">
   <zone id="cluster-lab" routing="Full">
@@ -45,7 +46,7 @@
          cgroup (CPUQuota=50%). Los comentarios indican la fecha/medición. -->
     <host id="worker-1"    speed="30.37Mf"/>   <!-- 2 slots (~15.18Mf c/u), medido 2026-11 -->
     <host id="worker-2"    speed="16.26Mf"/>   <!-- 1 slot, medido 2026-11 -->
-    <host id="worker-3"    speed="8.89Mf"/>   <!-- 1 slot in-cgroup, medido 2026-11 -->
+    <host id="worker-3"    speed="7.61Mf"/>   <!-- 1 slot in-cgroup, medido 2026-11 -->
 
     <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
          Enlaces dedicados par a par (una pareja de VMs por enlace, como
@@ -54,12 +55,12 @@
            latency = RTT_ping / 2  (latencia unidireccional por enlace)
          Nota: la opcion latency de simulacion.py sobreescribe estos valores.
          :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: -->
-    <link id="link-coordinador-worker-1" bandwidth="100Mbps" latency="1ms"/>
-    <link id="link-coordinador-worker-2" bandwidth="100Mbps" latency="1ms"/>
-    <link id="link-coordinador-worker-3" bandwidth="100Mbps" latency="1ms"/>
-    <link id="link-worker-1-worker-2"    bandwidth="100Mbps" latency="1ms"/>
-    <link id="link-worker-1-worker-3"    bandwidth="100Mbps" latency="1ms"/>
-    <link id="link-worker-2-worker-3"    bandwidth="100Mbps" latency="1ms"/>
+    <link id="link-coordinador-worker-1" bandwidth="3062MBps" latency="1ms"/>
+    <link id="link-coordinador-worker-2" bandwidth="3062MBps" latency="1ms"/>
+    <link id="link-coordinador-worker-3" bandwidth="3062MBps" latency="1ms"/>
+    <link id="link-worker-1-worker-2"    bandwidth="3062MBps" latency="1ms"/>
+    <link id="link-worker-1-worker-3"    bandwidth="3062MBps" latency="1ms"/>
+    <link id="link-worker-2-worker-3"    bandwidth="3062MBps" latency="1ms"/>
 
     <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
          Rutas del routing Full. Cada pareja usa su enlace dedicado, asi

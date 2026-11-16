@@ -321,7 +321,7 @@ echo "== worker-3 (1 slot, in-cgroup CPUQuota=50%)"; \
 # Valores de referencia medidos (2026-11, i3-10100F, mismos cores físicos):
 #   worker-1: 30,376,492 unidades/s  -> speed="30.37Mf"
 #   worker-2: 16,262,100 unidades/s  -> speed="16.26Mf"
-#   worker-3:  8,892,034 unidades/s  -> speed="8.89Mf"
+#   worker-3:  7,619,644 unidades/s  -> speed="7.61Mf"
 #   (jerarquía ~4:2:1, fiel al diseño original 2:1:0.5)
 
 # 2) Ancho de banda entre VMs (Mbps → bandwidth="...Mbps"):

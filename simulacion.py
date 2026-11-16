@@ -71,7 +71,8 @@ CONTROL_BYTES = 64      # mensajes de control: REGISTER, ACK, STATUS, RESULT
 STOP_BYTES = 16         # centinela de cierre (no contabiliza como control)
 UNIDADES_TRIVIAL = 1_000_000   # tarea de verificación (= BENCHMARK_UNITS de worker.py)
 
-ANCHO_BANDA = "100Mbps"  # ancho de banda de los enlaces dedicados
+ANCHO_BANDA = "3062MBps"  # ancho de banda de los enlaces dedicados
+  # (iperf3 entre VMs: ~24.5 Gbps = 3.06 GB/s; se mide con set_netem en el README)
 # Velocidades calibrables del perfil heterogéneo (ver plataforma_base.xml):
 SPEED_COORDINADOR = "1Gf"     # el coordinador no computa; valor nominal
 # Velocidades AGREGADAS medidas con `worker.py --benchmark` (ver XML): el
@@ -79,7 +80,7 @@ SPEED_COORDINADOR = "1Gf"     # el coordinador no computa; valor nominal
 # de N slots en paralelo se modela como speed agregada del host (core=1).
 SPEED_POTENTE = "30.37Mf"      # worker-1: 2 slots de proceso (~15.18Mf c/u)
 SPEED_MEDIO = "16.26Mf"        # worker-2: 1 slot
-SPEED_LENTO = "8.89Mf"        # worker-3: 1 slot dentro del cgroup CPUQuota=50%
+SPEED_LENTO = "7.61Mf"        # worker-3: 1 slot dentro del cgroup CPUQuota=50%
 
 # Estado compartido entre actores S4U de una MISMA corrida (los actores Python
 # corren en hilos reales; el GIL hace atómicas las lecturas/escrituras simples).

@@ -36,6 +36,7 @@ import statistics
 import sys
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 import zmq
 
@@ -99,15 +100,17 @@ class WorkerState:
 
     def __init__(self):
         self.tareas: queue.Queue = queue.Queue()
-        self.running = False          # ¿hay una tarea en ejecución?
+        self.slots_busy = 0           # nº de slots de ejecución ocupados
+        self.slots_lock = threading.Lock()
         self.active_cpu_s = 0.0       # tiempo total activo acumulado
         self.tasks_completed = 0
+        self.n_slots = 1              # nº de hilos consumidores (STOP: 1 centinela c/u)
         self.stop_event = threading.Event()
         self.registrado = threading.Event()   # ACK del coordinador recibido
 
     def load(self) -> int:
-        """Carga vista por el canal de control: cola + en ejecución."""
-        return self.tareas.qsize() + (1 if self.running else 0)
+        """Carga vista por el canal de control: cola + slots ocupados."""
+        return self.tareas.qsize() + self.slots_busy
 
 
 # ----------------------------------------------------------------------
@@ -136,8 +139,10 @@ def hilo_receptor(dealer, estado: WorkerState, worker_id: str):
             estado.registrado.set()
             print(f"[REG] ACK recibido por el coordinador ({worker_id})")
         elif tipo == "STOP":
-            # centinela: el hilo trabajador termina tras drenar la cola
-            estado.tareas.put(None)
+            # centinela: UNO por hilo consumidor; cada hilo drena la cola
+            # hasta encontrar el suyo (las tareas encoladas sí se ejecutan)
+            for _ in range(estado.n_slots):
+                estado.tareas.put(None)
             estado.stop_event.set()
 
 
@@ -155,61 +160,105 @@ def hilo_control(rep, estado: WorkerState, worker_id: str):
         except zmq.ZMQError:
             continue
         if msg.get("type") == "STATUS":
-            # carga = tareas pendientes en cola + tarea en ejecución
+            # carga = tareas pendientes en cola + slots ocupados
             rep.send_json({"worker_id": worker_id,
                            "queue": estado.tareas.qsize(),
-                           "running": 1 if estado.running else 0})
+                           "running": estado.slots_busy})
         else:
             rep.send_json({"error": "mensaje no reconocido"})
 
 
-def hilo_trabajador(dealer, estado: WorkerState, worker_id: str):
-    """Consume la cola local secuencialmente: 1 núcleo dedicado."""
+def _tarea_cpu(units: int) -> float:
+    """Ejecuta cómputo en un PROCESO del pool (evita el GIL: los threads de
+    Python no paralelizan el hashing). Devuelve el tiempo activo real."""
+    t0 = time.perf_counter()
+    execute_cpu_work(units)
+    return time.perf_counter() - t0
+
+
+def hilo_trabajador(dealer, estado: WorkerState, worker_id: str,
+                    executor, send_lock):
+    """Consume la cola local. Con --threads 1 ejecuta inline (1 núcleo);
+    con N>1, cada hilo despacha su tarea al pool de procesos y bloquea
+    esperándola (N procesos = N núcleos reales)."""
     while True:
         tarea = estado.tareas.get()
         if tarea is None:               # centinela de STOP
             break
-        estado.running = True
+        with estado.slots_lock:
+            estado.slots_busy += 1
         started_at = time.time()        # epoch: el coordinador mide waits
-        t0 = time.perf_counter()
-        execute_cpu_work(int(tarea.get("cpu_work", 0)))
-        t1 = time.perf_counter()
+        units = int(tarea.get("cpu_work", 0))
+        if executor is None:
+            t0 = time.perf_counter()
+            execute_cpu_work(units)
+            elapsed = time.perf_counter() - t0
+        else:
+            elapsed = executor.submit(_tarea_cpu, units).result()
         finished_at = time.time()
-        estado.running = False
+        with estado.slots_lock:
+            estado.slots_busy -= 1
 
-        estado.active_cpu_s += t1 - t0  # tiempo activo real del núcleo
+        estado.active_cpu_s += elapsed  # tiempo activo real del cómputo
         estado.tasks_completed += 1
-        dealer.send_json({
-            "type": "RESULT",
-            "task_id": tarea.get("task_id"),
-            "worker": worker_id,
-            "started_at": started_at,
-            "finished_at": finished_at,
-        })
+        # ZMQ: los sockets NO son thread-safe -> los envíos se serializan
+        with send_lock:
+            dealer.send_json({
+                "type": "RESULT",
+                "task_id": tarea.get("task_id"),
+                "worker": worker_id,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            })
 
 
 # ----------------------------------------------------------------------
 # Modo benchmark (calibración SimGrid)
 # ----------------------------------------------------------------------
-def run_benchmark():
+def run_benchmark(n_slots: int = 1):
+    """Mide la capacidad del nodo EN SU CONFIGURACIÓN REAL: `n_slots` debe
+    coincidir con los --threads del servicio (p. ej. worker-1 = 2), y para
+    nodos con cuota cgroup (worker-3) debe lanzarse DENTRO de ese cgroup
+    (ver README §5.1) para que el techo se aplique.
+
+    Con n_slots>1 la métrica relevante es la velocidad AGREGADA (los slots
+    corren en paralelo vía procesos): es lo que el experimento experimenta
+    y lo que SimGrid debe modelar como speed del host."""
     print(f"[BENCH] tarea de referencia: {BENCHMARK_UNITS} unidades CPU x "
-          f"{BENCHMARK_RUNS} corridas")
-    tiempos = []
-    for i in range(1, BENCHMARK_RUNS + 1):
-        t0 = time.perf_counter()
-        execute_cpu_work(BENCHMARK_UNITS)
-        t1 = time.perf_counter()
-        tiempos.append(t1 - t0)
-        print(f"  corrida {i:2d}/{BENCHMARK_RUNS}: {tiempos[-1]:.4f} s")
-    media = statistics.fmean(tiempos)
-    stdev = statistics.stdev(tiempos) if len(tiempos) > 1 else 0.0
-    velocidad = BENCHMARK_UNITS / media  # unidades de CPU por segundo
-    print(f"[BENCH] tiempo medio : {media:.4f} s")
-    print(f"[BENCH] desv. estandar: {stdev:.4f} s")
-    print(f"[BENCH] velocidad vCPU: {velocidad:.0f} unidades/s "
-          f"(usar como velocidad de host en SimGrid, p. ej. "
-          f"{velocidad / 1e6:.2f} Mflops)")
-    return media, stdev
+          f"{BENCHMARK_RUNS} corridas x {n_slots} slot(s)")
+    executor = None
+    if n_slots > 1:
+        executor = ProcessPoolExecutor(max_workers=n_slots)
+        # pre-calentar: el forkserver de Python 3.14 tarda ~0.3 s en crear
+        # cada proceso; sin esto la corrida 1 saldría inflada.
+        for _ in range(n_slots):
+            executor.submit(_tarea_cpu, 1).result()
+    try:
+        tiempos = []
+        for i in range(1, BENCHMARK_RUNS + 1):
+            t0 = time.perf_counter()
+            if n_slots == 1:
+                execute_cpu_work(BENCHMARK_UNITS)
+            else:
+                futs = [executor.submit(_tarea_cpu, BENCHMARK_UNITS)
+                        for _ in range(n_slots)]
+                for f in futs:
+                    f.result()
+            tiempos.append(time.perf_counter() - t0)
+            print(f"  corrida {i:2d}/{BENCHMARK_RUNS}: {tiempos[-1]:.4f} s")
+        media = statistics.fmean(tiempos)
+        stdev = statistics.stdev(tiempos) if len(tiempos) > 1 else 0.0
+        por_slot = BENCHMARK_UNITS / media              # por slot
+        agregada = por_slot * n_slots                   # capacidad del nodo
+        print(f"[BENCH] tiempo medio : {media:.4f} s")
+        print(f"[BENCH] desv. estandar: {stdev:.4f} s")
+        print(f"[BENCH] velocidad por slot: {por_slot:,.0f} unidades/s")
+        print(f"[BENCH] velocidad AGREGADA del nodo ({n_slots} slot(s)): "
+              f"{agregada:,.0f} unidades/s (usar como speed del host en SimGrid)")
+    finally:
+        if executor is not None:
+            executor.shutdown()
+    return media, stdev, agregada
 
 
 # ----------------------------------------------------------------------
@@ -223,6 +272,10 @@ def parse_args():
                    help="identidad DEALER (default: hostname de la VM)")
     p.add_argument("--benchmark", action="store_true",
                    help="no conecta al coordinador; calibra la vCPU y sale")
+    p.add_argument("--threads", type=int, default=1,
+                   help="slots de ejecución en paralelo (procesos). El valor "
+                        "debe coincidir entre el servicio y --benchmark; "
+                        "worker-1 (2 vCPU) corre con 2")
     return p.parse_args()
 
 
@@ -242,7 +295,6 @@ def run_worker(args):
     rep.bind(f"tcp://*:{PORT_STATUS}")
 
     estado = WorkerState()
-    h_trabajo = None
 
     try:
         # 1) REGISTER con REINTENTOS hasta ACK. El worker corre como servicio
@@ -266,22 +318,38 @@ def run_worker(args):
                   f"(control: {status_endpoint})")
             estado.registrado.wait(timeout=2.5)
 
-        # 2) Lanzar los hilos restantes de servicio
+        # 2) Slots de ejecución: pool de procesos si --threads > 1 (los
+        #    threads de Python no paralelizan el hashing por el GIL).
+        executor, send_lock = None, threading.Lock()
+        estado.n_slots = max(1, args.threads)
+        if estado.n_slots > 1:
+            executor = ProcessPoolExecutor(max_workers=estado.n_slots)
+            # pre-calentar: el forkserver tarda ~0.3 s por proceso la 1ª vez
+            for _ in range(estado.n_slots):
+                executor.submit(_tarea_cpu, 1).result()
+
+        # 3) Lanzar los hilos restantes de servicio (1 hilo consumidor por slot)
         h_control = threading.Thread(target=hilo_control,
                                      args=(rep, estado, args.worker_id),
                                      daemon=True, name="control")
-        h_trabajo = threading.Thread(target=hilo_trabajador,
-                                     args=(dealer, estado, args.worker_id),
-                                     daemon=True, name="trabajador")
+        hilos_trabajo = [
+            threading.Thread(target=hilo_trabajador,
+                             args=(dealer, estado, args.worker_id,
+                                   executor, send_lock),
+                             daemon=True, name=f"trabajador-{i}")
+            for i in range(estado.n_slots)
+        ]
         h_control.start()
-        h_trabajo.start()
+        for h in hilos_trabajo:
+            h.start()
 
-        # 3) Esperar el cierre limpio (STOP o Ctrl+C)
+        # 4) Esperar el cierre limpio (STOP o Ctrl+C)
         while not estado.stop_event.is_set():
             time.sleep(0.2)
-        h_trabajo.join(timeout=5)
+        for h in hilos_trabajo:
+            h.join(timeout=5)
 
-        # 4) Resumen final: active_cpu_s para load_imbalance_cv
+        # 5) Resumen final: active_cpu_s para load_imbalance_cv
         dealer.send_json({"type": "FINAL_REPORT",
                           "worker": args.worker_id,
                           "tasks_completed": estado.tasks_completed,
@@ -290,8 +358,12 @@ def run_worker(args):
               f"active_cpu_s={estado.active_cpu_s:.3f} -> resumen enviado")
     finally:
         estado.stop_event.set()  # despierta a los hilos daemon
-        if h_trabajo is not None and h_trabajo.is_alive():
-            h_trabajo.join(timeout=3)  # deja terminar la tarea en curso
+        if 'executor' in locals() and executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        if 'hilos_trabajo' in locals():
+            for h in hilos_trabajo:
+                if h.is_alive():
+                    h.join(timeout=3)  # deja terminar la tarea en curso
         dealer.close(1000)
         rep.close(1000)
         ctx.term()
@@ -301,7 +373,7 @@ def main():
     args = parse_args()
     try:
         if args.benchmark:
-            run_benchmark()
+            run_benchmark(max(1, args.threads))
         else:
             run_worker(args)
     except KeyboardInterrupt:

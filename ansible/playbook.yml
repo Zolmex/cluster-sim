@@ -22,6 +22,10 @@
     sod_owner: vagrant
     # Cuota de CPU del servicio del worker: solo el nodo antiguo.
     sod_worker_cpuquota: "{{ 'CPUQuota=50%' if inventory_hostname == 'worker-3' else '' }}"
+    # Slots de ejecución en paralelo (procesos): worker-1 tiene 2 vCPU y
+    # explota ambas; los demás quedan a 1. El benchmark (§5.1 del README)
+    # debe correr con el mismo --threads del servicio.
+    sod_worker_threads: "{{ 2 if inventory_hostname == 'worker-1' else 1 }}"
 
   handlers:
     - name: Reiniciar sod-worker
@@ -99,7 +103,10 @@
           Type=simple
           User=vagrant
           WorkingDirectory=/opt/sod_cluster
-          ExecStart=/usr/bin/python3 /opt/sod_cluster/worker.py --coordinator-ip 192.168.56.10
+          ExecStart=/usr/bin/python3 /opt/sod_cluster/worker.py --coordinator-ip 192.168.56.10 --threads {{ sod_worker_threads }}
+          # --threads = slots de ejecución en paralelo (procesos, por el GIL).
+          # worker-1 usa 2 (sus 2 vCPU); en SimGrid su speed se modela como
+          # velocidad AGREGADA (benchmark §5.1), no per-core.
           # always (no solo on-failure): tras cada corrida el coordinador manda
           # STOP y el worker sale LIMPIO (exit 0); con on-failure quedaría
           # caído y la siguiente corrida no tendría workers. Con always,

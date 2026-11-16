@@ -10,13 +10,18 @@
 
   COMO CALIBRAR (tras `vagrant up`):
     1) Velocidad de CPU (speed, en FLOPS):
-       Ejecuta `python worker.py` con la opcion benchmark en cada VM. Imprime
-       la velocidad de la vCPU en unidades/s. Con "flops per unit" = 1 en
-       simulacion.py, pon aqui directamente esa cifra (p. ej. speed="9.3Mf").
+       Ejecuta `python worker.py --benchmark` en cada VM con el MISMO
+       --threads del servicio (ver README 5.1): worker-1 usa --threads 2
+       (sus 2 vCPU via pool de procesos; los threads no paralelizan el
+       hashing por el GIL) y worker-3 corre DENTRO de su cgroup
+       (sudo systemd-run --scope -p CPUQuota=50% ...). Imprime la velocidad
+       AGREGADA del nodo en unidades/s. Con "flops per unit" = 1 (default
+       de simulacion.py), pon aqui directamente esa cifra (p. ej.
+       speed="30.37Mf"). El actor worker del sim ejecuta tareas
+       secuencialmente: por eso el speed de worker-1 es la velocidad
+       AGREGADA de sus 2 slots, no la per-core.
        Si mantienes las proporciones relativas entre nodos, usa:
          flops_per_unit = velocidad_del_host_simulado / unidades_por_segundo_reales
-       Perfil: worker-1 potente (2 vCPU), worker-2 medio, worker-3 lento
-       (1 vCPU + CPUQuota=50 por ciento, ver playbook de ansible).
     2) Latencia (latency): latencia UNIDIRECCIONAL de cada enlace dedicado.
        Equivale al delay que aplica scripts/set_netem.sh (tc netem delay X
        por interfaz, de modo que el RTT de ping resulta 2X). Tras medir con
@@ -34,10 +39,13 @@
          potente / medio / lento igual que los perfiles del Vagrantfile.
          SUSTITUIR estos valores tras el benchmark de worker.py (cabecera).
          :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: -->
-    <host id="coordinador" speed="1Gf"/>   <!-- nodo de despacho (no computa) -->
-    <host id="worker-1"    speed="2Gf"/>   <!-- potente: 2 vCPU / 1536 MB -->
-    <host id="worker-2"    speed="1Gf"/>   <!-- medio:   1 vCPU / 1024 MB -->
-    <host id="worker-3"    speed="0.5Gf"/> <!-- lento:   1 vCPU / 512 MB -->
+    <host id="coordinador" speed="1Gf"/>      <!-- nodo de despacho (no computa) -->
+    <!-- Velocidades AGREGADAS medidas (ver cabecera, punto 1): el benchmark
+         corre con el mismo --threads del servicio y worker-3 dentro de su
+         cgroup (CPUQuota=50%). Los comentarios indican la fecha/medición. -->
+    <host id="worker-1"    speed="30.37Mf"/>   <!-- 2 slots (~15.18Mf c/u), medido 2026-11 -->
+    <host id="worker-2"    speed="16.26Mf"/>   <!-- 1 slot, medido 2026-11 -->
+    <host id="worker-3"    speed="8.89Mf"/>   <!-- 1 slot in-cgroup, medido 2026-11 -->
 
     <!-- ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
          Enlaces dedicados par a par (una pareja de VMs por enlace, como

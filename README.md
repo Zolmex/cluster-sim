@@ -305,10 +305,24 @@ Los tres parámetros del XML se miden sobre el clúster real (paso 1 de la
 ruta). Con las VMs levantadas:
 
 ```bash
-# 1) Velocidad de CPU de cada worker (unidades CPU/s → speed="..."):
-for m in worker-1 worker-2 worker-3; do
-    echo "== $m"; vagrant ssh $m --command 'python3 /opt/sod_cluster/worker.py --benchmark'
-done
+# 1) Velocidad de CPU AGREGADA de cada worker (unidades/s → speed="...").
+#    worker-1 tiene 2 vCPU: corre con --threads 2 (pool de procesos; los
+#    threads de Python no paralelizan el hashing por el GIL) y su speed es
+#    la suma de ambos slots. worker-3 tiene CPUQuota=50%: el benchmark debe
+#    correr DENTRO de su cgroup para que el techo se aplique.
+echo "== worker-1 (2 slots)"; \
+  vagrant ssh worker-1 --command 'python3 /opt/sod_cluster/worker.py --benchmark --threads 2'
+echo "== worker-2 (1 slot)"; \
+  vagrant ssh worker-2 --command 'python3 /opt/sod_cluster/worker.py --benchmark'
+echo "== worker-3 (1 slot, in-cgroup CPUQuota=50%)"; \
+  vagrant ssh worker-3 --command 'sudo systemd-run --scope -p CPUQuota=50% -p User=vagrant \
+    python3 /opt/sod_cluster/worker.py --benchmark'
+
+# Valores de referencia medidos (2026-11, i3-10100F, mismos cores físicos):
+#   worker-1: 30,376,492 unidades/s  -> speed="30.37Mf"
+#   worker-2: 16,262,100 unidades/s  -> speed="16.26Mf"
+#   worker-3:  8,892,034 unidades/s  -> speed="8.89Mf"
+#   (jerarquía ~4:2:1, fiel al diseño original 2:1:0.5)
 
 # 2) Ancho de banda entre VMs (Mbps → bandwidth="...Mbps"):
 vagrant ssh worker-1 --command 'iperf3 -s -D'
@@ -322,12 +336,17 @@ vagrant ssh worker-1 --command 'ping -c 3 192.168.56.10'
 ./scripts/set_netem.sh 0
 ```
 
-Anotá los valores en `plataforma_base.xml` (su cabecera explica qué campo
-toca en cada caso). El dashboard de Grafana (§4) sirve acá para **validar el
-modelo**: worker-3 debe verse techo a ~50% de CPU (CPUQuota) y los paneles
-rx/tx de eth1 deben cuadrar con los payloads del workload (10 KB livianas /
-2 MB pesadas). Para números exactos, exportá la serie del panel
-(*Inspect → Data → CSV*) o consultá la API de Prometheus directamente.
+Anotá los valores medidos en `plataforma_base.xml` (su cabecera explica qué
+campo toca en cada caso). La clave de interpretación: el actor worker del
+sim ejecuta tareas **sequencialmente**, así que el `speed` de worker-1 es la
+velocidad **agregada** de sus 2 slots (30.5Mf), no la per-core (~15.2Mf).
+Con `--flops-per-unit 1` (default), el speed del XML va directo en unidades/s.
+
+El dashboard de Grafana (§4) sirve acá para **validar el modelo**: worker-3
+debe verse techo a ~50% de CPU (CPUQuota) y los paneles rx/tx de eth1 deben
+cuadrar con los payloads del workload (10 KB livianas / 2 MB pesadas). Para
+números exactos, exportá la serie del panel (*Inspect → Data → CSV*) o
+consultá la API de Prometheus directamente.
 
 ### Test de sanidad (--trivial-test)
 
@@ -336,7 +355,8 @@ rx/tx de eth1 deben cuadrar con los payloads del workload (10 KB livianas /
 ```
 
 Simula 1 tarea de 1 GFLOP en un host de 2 GFLOPS: el tiempo simulado debe
-coincidir con el analítico (`error relativo: 0.0% -> OK`) y la fila queda en
+coincidir con el analítico (`error relativo < 0.1% -> OK`; el residuo es
+overhead de scheduling de actores, no del motor) y la fila queda en
 `resultados_simulacion.csv`.
 
 **Corrida individual** (misma semilla => lote reproducible):
